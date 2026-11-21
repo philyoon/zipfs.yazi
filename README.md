@@ -9,7 +9,7 @@ One Lua file and `7zz`, nothing else to build or install. It uses Yazi's custom 
 (`kind = "mount"`), so inside an archive Yazi's normal keys just work: preview, open, copy,
 paste, rename, delete.
 
-Tested on Yazi 26.9.1 (macOS). The custom VFS API is experimental upstream and may change.
+Tested on Yazi 26.9.1, on macOS and Linux (CI runs both). The custom VFS API is experimental upstream and may change.
 
 ## Formats
 
@@ -148,8 +148,6 @@ desc = "Clear the zipfs cache"
 
 ## Limits
 
-- Tested on macOS. Linux should work (nothing macOS-specific is left), but hasn't been
-  tried.
 - Nested archives are not entered (a zip inside a zip opens with your opener instead).
 - Encrypted archives and entries are not supported.
 - Every VFS call re-reads the cached listing (Yazi gives each call a fresh Lua state), so
