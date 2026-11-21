@@ -158,7 +158,8 @@ desc = "Clear the zipfs cache"
 ## Development
 
 ```sh
-lua tests/unit.lua   # listing parser and format table (Lua 5.4+)
+mise install         # Lua 5.4 (what Yazi embeds), pinned in mise.toml
+lua tests/unit.lua   # listing parser and format table
 tests/e2e.sh         # a real Yazi in tmux, driven with `ya emit-to`
 ```
 
