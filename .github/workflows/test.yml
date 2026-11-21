@@ -1,0 +1,67 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Lua
+        run: sudo apt-get update && sudo apt-get install -y lua5.4
+      - name: Unit tests
+        run: lua5.4 tests/unit.lua
+
+  # A real Yazi in tmux, driven with `ya emit-to`. Versions are pinned: Yazi's custom VFS
+  # API is experimental, so a new Yazi release is something to test on purpose.
+  e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            yazi: yazi-x86_64-unknown-linux-gnu
+            sevenzip: 7z2605-linux-x64.tar.xz
+          - os: macos-latest
+            yazi: yazi-aarch64-apple-darwin
+            sevenzip: 7z2605-mac.tar.xz
+    runs-on: ${{ matrix.os }}
+    env:
+      YAZI_VERSION: v26.9.1
+      SEVENZIP_VERSION: "26.05"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tmux and zstd
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update && sudo apt-get install -y tmux zstd file
+          else
+            brew install tmux zstd
+          fi
+
+      - name: Install Yazi
+        run: |
+          curl -fsSL -o yazi.zip "https://github.com/sxyazi/yazi/releases/download/$YAZI_VERSION/${{ matrix.yazi }}.zip"
+          unzip -q yazi.zip
+          mkdir -p "$HOME/.local/bin"
+          cp "${{ matrix.yazi }}/yazi" "${{ matrix.yazi }}/ya" "$HOME/.local/bin/"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install 7-Zip
+        run: |
+          curl -fsSL -o 7z.tar.xz "https://github.com/ip7z/7zip/releases/download/$SEVENZIP_VERSION/${{ matrix.sevenzip }}"
+          mkdir 7z && tar -xf 7z.tar.xz -C 7z
+          cp 7z/7zz "$HOME/.local/bin/"
+
+      - name: Versions
+        run: |
+          yazi --version
+          7zz | head -3
+
+      - name: End-to-end tests
+        run: tests/e2e.sh

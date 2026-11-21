@@ -1205,4 +1205,13 @@ function M:entry(job)
 	ya.emit(h and h.is_dir and "enter" or "open", { hovered = true })
 end
 
+-- Pure helpers, exposed for tests/unit.lua. Not part of the plugin's interface.
+M._test = {
+	format_of = format_of,
+	writable = writable,
+	parse_listing = parse_listing,
+	parse_mode = parse_mode,
+	parse_time = parse_time,
+}
+
 return M

@@ -1,5 +1,7 @@
 # zipfs.yazi
 
+[![test](https://github.com/philyoon/zipfs.yazi/actions/workflows/test.yml/badge.svg)](https://github.com/philyoon/zipfs.yazi/actions/workflows/test.yml)
+
 A lightweight, 7zz-based archive filesystem for Yazi: enter zip, 7z, rar and tar files as
 folders, and edit zip and 7z in place.
 
@@ -154,6 +156,18 @@ desc = "Clear the zipfs cache"
   very large archives (tens of thousands of entries) will feel slower.
 - Solid 7z and rar archives decompress everything before a file to reach it, so previews
   in big solid archives are slow.
+
+## Development
+
+```sh
+lua tests/unit.lua   # listing parser and format table (Lua 5.4+)
+tests/e2e.sh         # a real Yazi in tmux, driven with `ya emit-to`
+```
+
+The end-to-end tests need `yazi`, `ya`, `7zz`, `tmux` and `zstd`, and run everything in a
+temp folder: their own Yazi config, plugin cache and archives, plus stub `trash` and editor
+commands. `tests/e2e.sh zip_` runs only the tests whose names start with `zip_`;
+`E2E_KEEP=1` keeps the temp folder. CI runs both on Ubuntu and macOS with Yazi 26.9.1.
 
 ## See also
 
