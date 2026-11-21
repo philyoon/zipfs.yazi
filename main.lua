@@ -1,11 +1,12 @@
---- Browse zip archives as folders through Yazi's custom VFS (kind = "mount").
+--- Browse archives as folders through Yazi's custom VFS (kind = "mount"): zip and 7z
+--- (read and write), rar and tar, plain or compressed (read-only).
 ---
 --- Listing, extraction and edits go through `7zz`, which keeps non-ASCII names intact
---- (macOS `zipinfo`/`unzip` turn them into "????").
+--- (`zipinfo`/`unzip` on macOS turn them into "????").
 ---
---- Supported edits: trash, delete, rename, new folder, new file, paste into the zip. Each one
---- rewrites the whole zip (that is how zip works), so they are serialized per archive with a
---- lock.
+--- Supported edits: trash, delete, rename, new folder, new file, paste into the archive. Each
+--- one rewrites the whole archive (that is how zip and 7z work), so they are serialized per
+--- archive with a lock.
 ---
 --- Opened files are saved back too. The opener gets the extracted copy, and Yazi's own
 --- `upload` (which syncs a cache copy back) only works for SFTP, so zipfs does it itself: a
@@ -25,6 +26,40 @@ local DIR_MODE, FILE_MODE = tonumber("40755", 8), tonumber("100644", 8)
 -- The fetcher extracts automatically up to this size; bigger entries are extracted only
 -- when opened, so scrolling past a 2 GB video doesn't stall.
 local AUTO_EXTRACT_MAX = 64 * 1024 * 1024
+
+-- Formats, matched on the lowercased file name. `type` is 7zz's -t for writing; formats
+-- without one are read-only (7zz can't write rar, nor delete from tar). `tar` marks a
+-- compressed tar: 7zz sees a single inner .tar there, so that is decompressed into the
+-- cache once and browsed instead.
+local FORMATS = {
+	{ "%.zip$", type = "zip" },
+	{ "%.jar$", type = "zip" },
+	{ "%.7z$", type = "7z" },
+	{ "%.rar$" },
+	{ "%.tar$" },
+	{ "%.tar%.gz$", tar = true },
+	{ "%.tgz$", tar = true },
+	{ "%.tar%.bz2$", tar = true },
+	{ "%.tbz2?$", tar = true },
+	{ "%.tar%.xz$", tar = true },
+	{ "%.txz$", tar = true },
+	{ "%.tar%.zst$", tar = true },
+	{ "%.tzst$", tar = true },
+}
+
+local function format_of(path)
+	local name = tostring(path):lower()
+	for _, f in ipairs(FORMATS) do
+		if name:find(f[1]) then
+			return f
+		end
+	end
+end
+
+local function writable(archive)
+	local f = format_of(archive)
+	return f ~= nil and f.type ~= nil
+end
 
 local function err(kind, fmt, ...) return Error.fs { kind = kind, message = string.format(fmt, ...) } end
 
@@ -71,6 +106,7 @@ end
 --   <p><hash of size+mtime>.list  listing of one version of the archive
 --   <p>tree/                      extracted entries at their inner paths
 --   <p>tree.src                   the archive's path, so a cleanup can save edits first
+--   <p><hash of size+mtime>.tar   a compressed tar, decompressed (tar.gz etc. only)
 -- The listing is per version. Extracted copies are not: an edit only changes some entries,
 -- and Yazi doesn't re-run the fetcher for files it already knows, so throwing them all away
 -- on every edit would break previews. Each copy is checked against its entry instead.
@@ -88,18 +124,21 @@ end
 local function remove_cache(dir)
 	fs.remove("dir_all", Url(dir))
 	fs.remove("file", Url(dir .. ".list"))
+	fs.remove("file", Url(dir .. ".tar"))
 end
 
--- Remove cached listings of `archive` other than `keep` (a version path, or nil).
+-- Remove cached versions (listing, decompressed tar) of `archive` other than `keep` (a
+-- version path, or nil).
 local function prune_versions(archive, keep)
-	local files = fs.read_dir(Url(cache_root()), { resolve = false })
-	local prefix = archive_prefix(archive)
-	for _, f in ipairs(files or {}) do
+	local root, prefix = cache_root(), archive_prefix(archive)
+	for _, f in ipairs(fs.read_dir(Url(root), { resolve = false }) or {}) do
 		local name = f.name or ""
-		local dir = tostring(f.url):gsub("%.list$", "")
-		local own = name:sub(1, #prefix) == prefix
-		if own and dir ~= keep and not name:find("%.lock$") and not name:find("tree") then
-			remove_cache(dir)
+		-- A version is 32 hex digits; "tree", "lock" etc. start with a non-hex letter.
+		local version = name:sub(1, #prefix) == prefix and name:sub(#prefix + 1):match("^(%x+)")
+		local dir = version and string.format("%s/%s%s", root, prefix, version)
+		if dir and dir ~= keep then
+			fs.remove("file", f.url)
+			fs.remove("dir_all", f.url)
 		end
 	end
 end
@@ -171,11 +210,21 @@ local function parse_listing(text)
 			end
 		end
 
-		local path = kv.Path and kv.Path:gsub("^/+", ""):gsub("/+$", "")
+		-- tar paths often start with "./"; 7zz only matches them spelled that way, so the raw
+		-- path is kept for extraction.
+		local path = kv.Path
+		while path and (path:find("^/") or path:find("^%./")) do
+			path = path:gsub("^/+", ""):gsub("^%./+", "")
+		end
+		path = path and path:gsub("/+$", "")
+		if path == "." then
+			path = nil
+		end
 		-- Skip "../" entries: they would let a hostile zip write outside the cache folder.
 		local unsafe = path and (path == ".." or path:find("^%.%./") or path:find("/%.%./") or path:find("/%.%.$"))
 		if path and path ~= "" and not unsafe then
-			local is_dir = kv.Folder == "+"
+			-- 7z listings have no Folder field; the attributes start with "D" instead.
+			local is_dir = kv.Folder == "+" or (kv.Folder == nil and (kv.Attributes or ""):find("^D") ~= nil)
 			ensure_dir(path:match("^(.*)/[^/]+$") or "")
 			if not entries[path] then
 				add_child(path)
@@ -184,6 +233,7 @@ local function parse_listing(text)
 				children[path] = children[path] or {}
 			end
 			entries[path] = {
+				raw = kv.Path,
 				dir = is_dir,
 				len = is_dir and 0 or tonumber(kv.Size) or 0,
 				mtime = parse_time(kv.Modified),
@@ -192,6 +242,70 @@ local function parse_listing(text)
 		end
 	end
 	return { entries = entries, children = children }
+end
+
+-- 7zz rewrites the archive on every edit. Deleting a folder makes Yazi send one RemoveFile per
+-- file, possibly in parallel, so edits take a per-archive lock (mkdir is atomic). A lock
+-- older than LOCK_STALE seconds is assumed to be left over from a crash.
+local LOCK_STALE = 600
+
+-- `name` picks a separate lock ("lock" by default) for work that may run while an edit
+-- holds the main one.
+local function with_lock(archive, fn, name)
+	fs.create("dir_all", Url(cache_root()))
+	local lock = Url(string.format("%s/%s%s.lock", cache_root(), archive_prefix(archive), name or "lock"))
+	local deadline = os.time() + LOCK_STALE
+	while not fs.create("dir", lock) do
+		local cha = fs.cha(lock)
+		if cha and cha.mtime and os.time() - cha.mtime > LOCK_STALE then
+			fs.remove("dir", lock)
+		elseif os.time() > deadline then
+			return nil, err("TimedOut", "Timed out waiting for another edit of %s", archive)
+		else
+			ya.sleep(0.05)
+		end
+	end
+
+	local ok, a, b = pcall(fn)
+	fs.remove("dir", lock)
+	if not ok then
+		return nil, err("Other", "%s", a)
+	end
+	return a, b
+end
+
+
+-- The file 7zz reads for `archive`: the archive itself, or for a compressed tar the tar
+-- inside it, decompressed into the cache on first use (tar.gz can't be read selectively).
+local function source(archive)
+	local fmt = format_of(archive)
+	if not (fmt and fmt.tar) then
+		return archive
+	end
+	local dir, cha = archive_dir(archive)
+	if not dir then
+		return nil, cha
+	end
+	local tar = dir .. ".tar"
+	if fs.cha(Url(tar)) then
+		return tar
+	end
+	return with_lock(archive, function()
+		if fs.cha(Url(tar)) then
+			return tar -- another call decompressed it while this one waited
+		end
+		local stage = string.format("%s.x%d%d", tar, os.time(), math.random(1e9))
+		local _, e = run { "x", "-y", "-o" .. stage, archive }
+		local inner = not e and (fs.read_dir(Url(stage), { resolve = true }) or {})[1]
+		if inner and not inner.cha.is_dir then
+			os.rename(tostring(inner.url), tar)
+		end
+		fs.remove("dir_all", Url(stage))
+		if fs.cha(Url(tar)) then
+			return tar
+		end
+		return nil, e or err("InvalidData", "%s holds no tar", archive)
+	end, "untar")
 end
 
 local function index(archive)
@@ -203,8 +317,11 @@ local function index(archive)
 	local list_path = dir .. ".list"
 	local text = read_file(list_path)
 	if not text then
-		local e
-		text, e = run { "l", "-slt", "-ba", "-sccUTF-8", archive }
+		local src, e = source(archive)
+		if not src then
+			return nil, e
+		end
+		text, e = run { "l", "-slt", "-ba", "-sccUTF-8", src }
 		if not text then
 			return nil, e
 		end
@@ -287,10 +404,14 @@ local function extract_many(archive, idx, inners)
 
 	-- Extract next to the tree, then rename into place: 7zz rewrites files in place, and a
 	-- preview reading the old copy at that moment would fail.
+	local src, e = source(archive)
+	if not src then
+		return false, e
+	end
 	local stage = string.format("%s.x%d%d", idx.tree, os.time(), math.random(1e9))
-	local args = { "x", "-y", "-spd", "-sccUTF-8", "-o" .. stage, archive, "--" }
+	local args = { "x", "-y", "-spd", "-sccUTF-8", "-o" .. stage, src, "--" }
 	for _, inner in ipairs(todo) do
-		args[#args + 1] = inner
+		args[#args + 1] = idx.entries[inner].raw or inner
 	end
 	local _, e = run(args)
 	if not e then
@@ -323,34 +444,6 @@ local function extract(url)
 		return nil, err("InvalidData", "Could not extract %s (encrypted entry?)", inner)
 	end
 	return path
-end
-
--- 7zz rewrites the zip on every edit. Deleting a folder makes Yazi send one RemoveFile per
--- file, possibly in parallel, so edits take a per-archive lock (mkdir is atomic). A lock
--- older than LOCK_STALE seconds is assumed to be left over from a crash.
-local LOCK_STALE = 600
-
-local function with_lock(archive, fn)
-	fs.create("dir_all", Url(cache_root()))
-	local lock = Url(string.format("%s/%slock.lock", cache_root(), archive_prefix(archive)))
-	local deadline = os.time() + LOCK_STALE
-	while not fs.create("dir", lock) do
-		local cha = fs.cha(lock)
-		if cha and cha.mtime and os.time() - cha.mtime > LOCK_STALE then
-			fs.remove("dir", lock)
-		elseif os.time() > deadline then
-			return nil, err("TimedOut", "Timed out waiting for another edit of %s", archive)
-		else
-			ya.sleep(0.05)
-		end
-	end
-
-	local ok, a, b = pcall(fn)
-	fs.remove("dir", lock)
-	if not ok then
-		return nil, err("Other", "%s", a)
-	end
-	return a, b
 end
 
 -- Run a 7zz command that changes the archive, under the lock. `check(idx)` runs on a fresh
@@ -463,7 +556,7 @@ local function create_dir(url)
 		if not made then
 			return nil, e
 		end
-		return { "a", "-tzip", "-spd", "-sccUTF-8", archive, "--", inner }, nil, stage
+		return { "a", "-t" .. format_of(archive).type, "-spd", "-sccUTF-8", archive, "--", inner }, nil, stage
 	end)
 	fs.remove("dir_all", Url(stage))
 	return ok, e
@@ -509,7 +602,7 @@ end
 
 -- Add (or replace) <tree>/<inner> as <inner> in the zip. Caller holds the lock.
 local function add_from(archive, idx, inner, tree)
-	local ok, e = seven({ "a", "-tzip", "-spd", "-sccUTF-8", archive, "--", inner }, tree)
+	local ok, e = seven({ "a", "-t" .. format_of(archive).type, "-spd", "-sccUTF-8", archive, "--", inner }, tree)
 	if ok then
 		remove_cache(idx.dir)
 	end
@@ -545,7 +638,7 @@ local function write_back(archive, inners)
 		if #todo == 0 then
 			return todo
 		end
-		local args = { "a", "-tzip", "-spd", "-sccUTF-8", archive, "--" }
+		local args = { "a", "-t" .. format_of(archive).type, "-spd", "-sccUTF-8", archive, "--" }
 		for _, inner in ipairs(todo) do
 			args[#args + 1] = inner
 		end
@@ -562,12 +655,13 @@ end
 -- here on and whether the zip changed. A failure is shown, and the copy stays edited, so the
 -- next look tries again.
 local function settle(archive, idx, inners)
-	if #edited_among(idx, inners) == 0 then
+	-- Read-only formats can't take the edit; the copy keeps it until the cache is cleaned.
+	if not writable(archive) or #edited_among(idx, inners) == 0 then
 		return idx, false
 	end
 	local saved, e = write_back(archive, inners)
 	if not saved then
-		ya.notify { title = "zipfs", content = "Could not save into the zip: " .. tostring(e), level = "error", timeout = 8 }
+		ya.notify { title = "zipfs", content = "Could not save into the archive: " .. tostring(e), level = "error", timeout = 8 }
 		return idx, false
 	end
 	return index(archive) or idx, #saved > 0
@@ -691,8 +785,28 @@ local function write_chunk(url, offset, bytes)
 	end)
 end
 
--- Trash = extract the item, move the copy to the macOS Trash, then delete it from the zip.
--- It stays recoverable from the Trash as a normal file/folder.
+-- Moving a local file to the trash: Yazi's own trash code isn't exposed to plugins, so
+-- use whichever command exists. `trash` is built into macOS 14+ and is also trash-cli's
+-- name on Linux; `gio trash` comes with GLib (GNOME and most desktops).
+local TRASHERS = { { "trash" }, { "gio", "trash" }, { "trash-put" } }
+
+local function to_trash(path)
+	for _, t in ipairs(TRASHERS) do
+		local args = { table.unpack(t, 2) }
+		args[#args + 1] = path
+		local out = Command(t[1]):arg(args):stdin(Command.NULL):stdout(Command.NULL):stderr(Command.PIPED):output()
+		if out then -- nil: the command doesn't exist, try the next one
+			if out.status.success then
+				return true
+			end
+			return false, err("Other", "%s failed: %s", t[1], out.stderr)
+		end
+	end
+	return false, err("NotFound", "No trash command found; install trash-cli, or use D to delete")
+end
+
+-- Trash = extract the item, move the copy to the system trash, then delete it from the
+-- archive. It stays recoverable from the trash as a normal file/folder.
 local function trash(url)
 	local archive, inner, e = locate(url)
 	if not archive then
@@ -720,11 +834,9 @@ local function trash(url)
 			return nil, err("InvalidData", "Could not extract %s (encrypted entry?)", inner)
 		end
 
-		local out, e = Command("trash"):arg({ copy }):stdin(Command.NULL):stderr(Command.PIPED):output()
-		if not out then
-			return nil, err("NotFound", "Cannot run `trash`: %s", e)
-		elseif not out.status.success then
-			return nil, err("Other", "trash failed: %s", out.stderr)
+		local ok, e = to_trash(copy)
+		if not ok then
+			return nil, e
 		end
 		return { "d", "-spd", "-sccUTF-8", archive, "--", inner }
 	end)
@@ -732,8 +844,29 @@ local function trash(url)
 	return ok, e
 end
 
+-- Ops that change the archive, refused up front for read-only formats.
+local WRITES = {
+	RemoveFile = true,
+	RemoveDir = true,
+	RemoveDirAll = true,
+	Rename = true,
+	CreateDir = true,
+	Trash = true,
+	SetLen = true,
+	Write = true,
+}
+
 function M:provide(job)
 	local op = job.op
+
+	local d = op == "Open" and job.demand
+	if WRITES[op] or (d and (d.write or d.append or d.create or d.create_new or d.truncate)) then
+		local archive = locate(job.url or job.from)
+		if archive and not writable(archive) then
+			local e = err("PermissionDenied", "%s is read-only: zipfs can only change zip and 7z", archive)
+			return op ~= "Open" and false or nil, e
+		end
+	end
 
 	if op == "Capabilities" then
 		return { symlink = false, hard_link = false, trash = true, copy_progressive = false }
@@ -909,7 +1042,6 @@ local hovered = ya.sync(function()
 			url = tostring(f.url),
 			is_regular = f.url.spec.is_regular,
 			in_zip = f.url.spec.scheme == SCHEME,
-			ext = f.url.ext,
 			is_dir = f.cha.is_dir,
 		}
 end)
@@ -928,15 +1060,15 @@ end
 
 -- Edits in progress own a .lock folder, stage-* folders and writes/; leave those alone.
 local function busy(e)
-	return e.name:find("%.lock$") or e.name:find("^stage%-") or e.name:find("tree%.x%d+$") or e.name == "writes"
+	return e.name:find("%.lock$") or e.name:find("^stage%-") or e.name:find("%.x%d+$") or e.name == "writes"
 end
 
 -- Before an archive's extracted copies are deleted, save the edited ones into the zip.
 -- False means some could not be saved, so the copies must stay.
 local function save_tree(prefix)
 	local archive = read_file(string.format("%s/%stree.src", cache_root(), prefix))
-	if not archive or not fs.cha(Url(archive)) then
-		return true -- the zip is gone; nothing to save into
+	if not archive or not fs.cha(Url(archive)) or not writable(archive) then
+		return true -- the archive is gone, or can't be written; nothing to save into
 	end
 	local idx = index(archive)
 	if not idx then
@@ -1033,13 +1165,13 @@ local function clean()
 
 	local msg = string.format("Freed %.1f MB.", kib / 1024)
 	if keep then
-		msg = msg .. " Kept the zip you're in."
+		msg = msg .. " Kept the archive you're in."
 	end
 	if skipped > 0 then
 		msg = msg .. " An edit is in progress; its files were kept."
 	end
 	if unsaved > 0 then
-		msg = msg .. " Edited files that could not be saved into their zip were kept."
+		msg = msg .. " Edited files that could not be saved into their archive were kept."
 	end
 	ya.notify { title = "zipfs cache", content = msg, timeout = 4, level = unsaved > 0 and "warn" or "info" }
 end
@@ -1052,9 +1184,8 @@ function M:entry(job)
 	end
 
 	local h = hovered()
-	local ext = h and h.ext and h.ext:lower()
 
-	if h and h.is_regular and (ext == "zip" or ext == "jar") then
+	if h and h.is_regular and format_of(h.url) then
 		touch(h.url)
 		-- Edits left from an earlier visit, in folders Yazi won't look at by itself.
 		local idx = index(h.url)
