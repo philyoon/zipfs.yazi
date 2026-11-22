@@ -95,10 +95,24 @@ them encrypted.
 - If Yazi dies without that (killed, terminal closed), the next `l` on an archive deletes
   the copies it left. Edited copies that could not be saved stay until you enter that
   archive again, which saves them.
-- `g z` forgets every password except the one for the archive you are in.
+- `g z` forgets every password except those of archives still in use: open in a tab, or
+  with files yanked out of them.
 - An archive entered another way than `l` (for example `cd`) is listed, but its files
   can't be previewed until you enter it with `l` or open one of them.
 - One password per archive: files with different passwords in one zip are not supported.
+
+What this does not protect against:
+
+- Copies other programs make. A file you open goes to your opener, and editors (backup
+  and swap files), Quick Look, recent-file lists and Yazi's own preview cache (image and
+  PDF thumbnails) may keep decrypted copies or renderings that zipfs doesn't know about
+  and can't delete.
+- Programs running as you. The cache is private to your user, not to Yazi, so they can
+  read the decrypted copies while an archive is unlocked.
+- Recovery from disk. Locking deletes files the normal way, without overwriting them;
+  full-disk encryption (FileVault, LUKS) covers that.
+- File names in a zip. The zip format encrypts contents only; a 7z made with a password
+  (`compress --encrypt`, `save-as`) encrypts the names too.
 
 ### Compress and extract
 
@@ -256,8 +270,9 @@ extract = [{ run = "ya emit plugin zipfs extract", desc = "Extract here", for = 
 - Old versions of an archive's cache are removed as soon as the archive changes.
 - Entering an archive removes cache entries not used for 7 days.
 - Edited copies are saved into their archive before either cleanup deletes them.
-- `g z` (`plugin zipfs clean`) empties the whole cache, except the archive you are in: Yazi
-  doesn't re-detect file types after a clean, so its previews would break.
+- `g z` (`plugin zipfs clean`) empties the whole cache, except archives open in a tab (Yazi
+  doesn't re-detect file types after a clean, so their previews would break) and archives
+  with files yanked out of them (a paste still reads those).
 
 ## Limits
 

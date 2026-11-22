@@ -580,7 +580,8 @@ enc_7z_edit() {
 	expect "note.txt deleted" wait_until gone
 }
 
-# Leaving an archive locks it, but not while files yanked inside wait to be pasted.
+# Leaving an archive locks it, and g z forgets its password, but not while files yanked
+# inside wait to be pasted.
 enc_copy_out() {
 	restart_yazi
 	emit cd "$WORK"
@@ -595,6 +596,9 @@ enc_copy_out() {
 	emit cd "$WORK/out3"
 	sleep 1
 	expect "still unlocked with a yank pending" cached "$WORK/secret.zip"
+	emit plugin zipfs clean
+	sleep 1
+	expect "kept by g z too" cached "$WORK/secret.zip"
 	emit paste
 	expect "pasted with its content" wait_until grep -q "top secret" "$WORK/out3/note.txt"
 	emit reveal "$WORK/out3/note.txt"

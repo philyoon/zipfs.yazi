@@ -4,8 +4,7 @@
 local state = require(".state")
 local SCHEME, DOMAIN, get_password, set_password, unlocked =
   state.SCHEME, state.DOMAIN, state.get_password, state.set_password, state.unlocked
-local is_open, forget_passwords, hovered, current_archive, cwd_url =
-  state.is_open, state.forget_passwords, state.hovered, state.current_archive, state.cwd_url
+local is_open, forget_passwords, hovered, cwd_url = state.is_open, state.forget_passwords, state.hovered, state.cwd_url
 local core = require(".core")
 local format_of, writable, exec, run, read_file = core.format_of, core.writable, core.exec, core.run, core.read_file
 local write_atomic, cache_root, archive_prefix, archive_dir, locate =
@@ -164,11 +163,20 @@ end
 
 local function clean()
   local root = cache_root()
-  -- Yazi doesn't re-detect MIME types after a clean, so previews in the zip you're in would
-  -- point at deleted copies. Keep that one.
-  local here = current_archive()
-  local keep = here and archive_prefix(here)
-  forget_passwords(here) -- along with the decrypted copies
+  -- Yazi doesn't re-detect MIME types after a clean, so previews in an archive open in a
+  -- tab would point at deleted copies: keep those. And archives with files yanked out of
+  -- them, which a paste still reads.
+  local keep = {}
+  for _, a in ipairs(forget_passwords()) do -- along with the decrypted copies
+    keep[#keep + 1] = archive_prefix(a)
+  end
+  local function kept(name)
+    for _, p in ipairs(keep) do
+      if name:sub(1, #p) == p then
+        return true
+      end
+    end
+  end
   local out = Command("du"):arg({ "-sk", root }):stdout(Command.PIPED):stderr(Command.NULL):output()
   local kib = out and tonumber(out.stdout:match("^(%d+)")) or 0
 
@@ -185,15 +193,15 @@ local function clean()
       skipped = skipped + 1
       return false
     end
-    return not (keep and e.name:sub(1, #keep) == keep) -- keep the zip you're in
+    return not kept(e.name)
   end)
 
   out = Command("du"):arg({ "-sk", root }):stdout(Command.PIPED):stderr(Command.NULL):output()
   kib = kib - (out and tonumber(out.stdout:match("^(%d+)")) or 0)
 
   local msg = string.format("Freed %.1f MB.", kib / 1024)
-  if keep then
-    msg = msg .. " Kept the archive you're in."
+  if #keep > 0 then
+    msg = msg .. string.format(" Kept %d archive%s in use.", #keep, #keep > 1 and "s" or "")
   end
   if skipped > 0 then
     msg = msg .. " An edit is in progress; its files were kept."

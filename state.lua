@@ -66,12 +66,16 @@ end)
 
 local is_open = ya.sync(function(_, archive) return held_archives()[archive] == true end)
 
-local forget_passwords = ya.sync(function(st, keep)
-  local pw = keep and st.passwords and st.passwords[keep]
-  st.passwords = {}
-  if pw then
-    st.passwords[keep] = pw
+-- Forget every password except those of archives still in use (see held_archives).
+-- Returns those archives, as a list.
+local forget_passwords = ya.sync(function(st)
+  local held, kept, out = held_archives(), {}, {}
+  for a in pairs(held) do
+    out[#out + 1] = a
+    kept[a] = st.passwords and st.passwords[a]
   end
+  st.passwords = kept
+  return out
 end)
 
 local hovered = ya.sync(function()
