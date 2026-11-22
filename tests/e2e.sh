@@ -657,6 +657,22 @@ pack_compress_zip() {
 	expect "no temp file left" not ls "$WORK"/in/.zipfs-* 2>/dev/null
 }
 
+# Several selected files go into one archive named after their folder.
+pack_compress_selected() {
+	emit cd "$WORK/src"
+	emit reveal "$WORK/src/b.txt"
+	emit toggle
+	emit reveal "$WORK/src/keep.txt"
+	emit toggle
+	emit plugin zipfs compress
+	expect "named after the folder" wait_until on_screen "src.zip"
+	keys Enter
+	expect "b.txt in it" wait_until has "$WORK/src/src.zip" b.txt
+	expect "keep.txt in it" has "$WORK/src/src.zip" keep.txt
+	expect "nothing else" test "$(7zz l -ba "$WORK/src/src.zip" | wc -l)" -eq 2
+	emit escape --select
+}
+
 pack_overwrite() {
 	emit reveal "$WORK/in/folder"
 	emit plugin zipfs compress
@@ -705,6 +721,19 @@ pack_extract_folder() {
 	expect "with all of them" test "$(find "$WORK/work" -mindepth 1 -maxdepth 1 | wc -l)" -gt 1
 	expect "says so" wait_until on_screen "Extracted work.zip to work"
 	expect "no temp folder left" not ls -d "$WORK"/.zipfs-* 2>/dev/null
+}
+
+pack_extract_selected() {
+	emit cd "$WORK"
+	emit reveal "$WORK/work.7z"
+	emit toggle
+	emit reveal "$WORK/book.epub"
+	emit toggle
+	emit plugin zipfs extract
+	expect "first selected extracted" wait_until test -d "$WORK/work (1)"
+	expect "second selected extracted" wait_until test -d "$WORK/book"
+	emit escape --select
+	rm -rf "$WORK/work (1)" "$WORK/book"
 }
 
 pack_extract_single() {
@@ -765,8 +794,8 @@ ALL="zip_browse zip_preview zip_copy_out zip_paste_in zip_paste_folder zip_overw
 	zip_move_in zip_rename zip_create zip_delete zip_trash zip_save_back zip_clean_saves_edits \
 	sevenz_browse sevenz_edit tar_browse targz_browse tarzst_browse targz_read_only \
 	epub_browse macos_hidden macos_rename macos_delete test_ok test_inside test_damaged \
-	pack_compress_zip pack_overwrite pack_compress_tarzst pack_compress_encrypted pack_extract_folder \
-	pack_extract_single pack_extract_macos pack_extract_tarzst pack_extract_opener pack_extract_encrypted \
+	pack_compress_zip pack_compress_selected pack_overwrite pack_compress_tarzst pack_compress_encrypted pack_extract_folder \
+	pack_extract_selected pack_extract_single pack_extract_macos pack_extract_tarzst pack_extract_opener pack_extract_encrypted \
 	enc_zip_enter enc_leave_locks enc_zip_paste enc_zip_save_back enc_7z_enter enc_7z_edit \
 	enc_clean_forgets enc_zipcrypto_open enc_open_cancel enc_quit_locks enc_crash_sweep"
 for t in ${E2E_TESTS:-$ALL}; do

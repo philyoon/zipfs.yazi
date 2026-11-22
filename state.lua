@@ -86,9 +86,9 @@ local targets = ya.sync(function()
   local tab = cx.active
   local function plain(url) return url.spec.is_regular and tostring(url) or nil end
   local paths, n = {}, 0
-  for _, url in pairs(tab.selected) do
+  for _, f in pairs(tab.selected) do -- Files, not Urls
     n = n + 1
-    paths[n] = plain(url) or false
+    paths[n] = plain(f.url) or false
   end
   if n == 0 and tab.current.hovered then
     n, paths[1] = 1, plain(tab.current.hovered.url) or false
