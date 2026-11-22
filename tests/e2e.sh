@@ -433,9 +433,11 @@ macos_delete() {
 	emit reveal "$(mount "$WORK/mac.zip" d2)"
 	wait_until on_screen "d2"
 	emit remove --permanently --force
-	expect "d2 deleted" wait_until not has "$WORK/mac.zip" d2/x.txt
-	expect "__MACOSX/d2 deleted too" not has "$WORK/mac.zip" __MACOSX/d2/._x.txt
-	expect "__MACOSX/._d2 deleted too" not has "$WORK/mac.zip" __MACOSX/._d2
+	# Yazi removes the files first and the folder in a later call, which takes the
+	# folder's own metadata (__MACOSX/._d2) with it, so wait for each.
+	expect "d2 deleted" wait_until not has "$WORK/mac.zip" d2
+	expect "__MACOSX/d2 deleted too" wait_until not has "$WORK/mac.zip" __MACOSX/d2/._x.txt
+	expect "__MACOSX/._d2 deleted too" wait_until not has "$WORK/mac.zip" __MACOSX/._d2
 	expect "pic.txt metadata kept" has "$WORK/mac.zip" __MACOSX/._pic.txt
 }
 
