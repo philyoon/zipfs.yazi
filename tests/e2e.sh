@@ -580,6 +580,29 @@ enc_7z_edit() {
 	expect "note.txt deleted" wait_until gone
 }
 
+# Leaving an archive locks it, but not while files yanked inside wait to be pasted.
+enc_copy_out() {
+	restart_yazi
+	emit cd "$WORK"
+	emit reveal "$WORK/secret.zip"
+	wait_until on_screen "secret.zip"
+	emit plugin zipfs
+	password secret.zip sekrit
+	wait_until on_screen "archive://zip/"
+	emit reveal "$(mount "$WORK/secret.zip" note.txt)"
+	emit yank
+	mkdir -p "$WORK/out3"
+	emit cd "$WORK/out3"
+	sleep 1
+	expect "still unlocked with a yank pending" cached "$WORK/secret.zip"
+	emit paste
+	expect "pasted with its content" wait_until grep -q "top secret" "$WORK/out3/note.txt"
+	emit reveal "$WORK/out3/note.txt"
+	emit yank
+	expect "locked once the yank is gone" wait_until not cached "$WORK/secret.zip"
+	emit unyank
+}
+
 enc_clean_forgets() {
 	emit cd "$WORK"
 	emit plugin zipfs clean
@@ -887,7 +910,7 @@ ALL="zip_browse zip_preview zip_copy_out zip_paste_in zip_paste_folder zip_overw
 	pack_extract_selected pack_extract_single pack_extract_macos pack_extract_tarzst pack_extract_opener pack_extract_encrypted \
 	pack_compress_junk pack_extract_gz cache_private saveas_convert saveas_add_password saveas_remove_password find_entry \
 	enc_zip_enter enc_leave_locks enc_zip_paste enc_zip_save_back enc_7z_enter enc_7z_edit \
-	enc_clean_forgets enc_zipcrypto_open enc_open_cancel enc_quit_locks enc_crash_sweep"
+	enc_copy_out enc_clean_forgets enc_zipcrypto_open enc_open_cancel enc_quit_locks enc_crash_sweep"
 for t in ${E2E_TESTS:-$ALL}; do
 	run "$t"
 done

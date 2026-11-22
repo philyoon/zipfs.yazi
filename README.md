@@ -87,7 +87,8 @@ them encrypted.
   zipfs refuses one there that belongs to someone else.
 - Leaving the archive (no tab is inside it any more) locks it: edits are saved, the
   decrypted copies and the listing are deleted, and the password is forgotten. Entering
-  again asks again.
+  again asks again. Files yanked inside keep it unlocked until you yank something else,
+  so they can still be pasted outside.
 - Quitting with `q` / `Q` bound to `plugin zipfs quit` (see Setup) locks every archive
   first. If Yazi then asks whether to quit with tasks running and you say no, enter the
   archive again.

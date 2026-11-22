@@ -19,25 +19,40 @@ local function open_archives()
   return open
 end
 
+-- Archives still needed unlocked: open in some tab, or with files yanked out of them, as a
+-- paste outside reads those through the password.
+local function held_archives()
+  local held = open_archives()
+  for _, f in pairs(cx.yanked) do -- Files, not Urls
+    if f.url.spec.scheme == SCHEME and f.url.base then
+      held[(tostring(f.url.base.path):gsub("/+$", ""))] = true
+    end
+  end
+  return held
+end
+
 local set_password = ya.sync(function(st, archive, pw)
   st.passwords = st.passwords or {}
   st.passwords[archive] = pw
   st.locking = st.locking or {}
   st.locking[archive] = nil
   if pw and not st.watching then
-    -- Once no tab is inside an archive with a password, lock it: `plugin zipfs lock`
-    -- saves edits, deletes the decrypted copies and forgets the password. That is too
-    -- slow for this callback, so it runs as a plugin call of its own.
+    -- Once no tab is inside an archive with a password and nothing yanked comes from it,
+    -- lock it: `plugin zipfs lock` saves edits, deletes the decrypted copies and forgets
+    -- the password. That is too slow for this callback, so it runs as a plugin call of its
+    -- own.
     st.watching = true
-    ps.sub("cd", function()
-      local open = open_archives()
+    local function check()
+      local held = held_archives()
       for a in pairs(st.passwords) do
-        if not open[a] and not st.locking[a] then
+        if not held[a] and not st.locking[a] then
           st.locking[a] = true
           ya.emit("plugin", { "zipfs", "lock " .. ya.quote(a) })
         end
       end
-    end)
+    end
+    ps.sub("cd", check)
+    ps.sub("@yank", check)
   end
 end)
 
@@ -49,7 +64,7 @@ local unlocked = ya.sync(function(st)
   return out
 end)
 
-local is_open = ya.sync(function(_, archive) return open_archives()[archive] == true end)
+local is_open = ya.sync(function(_, archive) return held_archives()[archive] == true end)
 
 local forget_passwords = ya.sync(function(st, keep)
   local pw = keep and st.passwords and st.passwords[keep]
