@@ -80,8 +80,18 @@ encrypted with the same password, AES zips stay AES, and a 7z with encrypted nam
 them encrypted.
 
 - The password stays in Yazi's memory only. It reaches `7zz` on stdin, never on the command
-  line, and is forgotten when Yazi quits or the cache is cleaned (`g z`).
-- Extracted copies in the cache are decrypted, like any extracted file. `g z` removes them.
+  line.
+- Extracted copies in the cache are decrypted, so they live only while you are inside.
+- Leaving the archive (no tab is inside it any more) locks it: edits are saved, the
+  decrypted copies and the listing are deleted, and the password is forgotten. Entering
+  again asks again.
+- Quitting with `q` / `Q` bound to `plugin zipfs quit` (see Setup) locks every archive
+  first. If Yazi then asks whether to quit with tasks running and you say no, enter the
+  archive again.
+- If Yazi dies without that (killed, terminal closed), the next `l` on an archive deletes
+  the copies it left. Edited copies that could not be saved stay until you enter that
+  archive again, which saves them.
+- `g z` forgets every password except the one for the archive you are in.
 - An archive entered another way than `l` (for example `cd`) is listed, but its files
   can't be previewed until you enter it with `l` or open one of them.
 - One password per archive: files with different passwords in one zip are not supported.
@@ -144,6 +154,17 @@ desc = "Clear the zipfs cache"
 on   = ["g", "t"]
 run  = "plugin zipfs test"
 desc = "Check the archive for damage"
+
+# Locks encrypted archives (deletes their decrypted copies) before quitting.
+[[mgr.prepend_keymap]]
+on   = "q"
+run  = "plugin zipfs quit"
+desc = "Quit"
+
+[[mgr.prepend_keymap]]
+on   = "Q"
+run  = "plugin zipfs -- quit --no-cwd-file"
+desc = "Quit without writing cwd-file"
 ```
 
 ## How it works

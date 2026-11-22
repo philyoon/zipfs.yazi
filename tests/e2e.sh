@@ -452,6 +452,21 @@ test_damaged() {
 
 # --- tests: encrypted ----------------------------------------------------------------------
 
+# unlock ARCHIVE: enter it with `l` and give the test password.
+unlock() {
+	emit cd "$WORK"
+	emit reveal "$1"
+	wait_until on_screen "$(basename "$1")"
+	emit plugin zipfs
+	password "$(basename "$1")" sekrit && wait_until on_screen "archive://zip/"
+}
+# cached ARCHIVE: zipfs still holds extracted (decrypted) copies from it.
+cached() {
+	local src
+	src=$(grep -lxF "$1" "$WORK"/tmp/yazi-zipfs/*tree.src 2>/dev/null | head -1)
+	[ -n "$src" ] && [ -n "$(find "${src%.src}" -type f 2>/dev/null | head -1)" ]
+}
+
 enc_zip_enter() {
 	emit cd "$WORK"
 	emit reveal "$WORK/secret.zip"
@@ -465,10 +480,24 @@ enc_zip_enter() {
 	expect "preview of an encrypted file" wait_until on_screen "top secret"
 }
 
+enc_leave_locks() {
+	expect "decrypted copies while inside" cached "$WORK/secret.zip"
+	emit cd "$WORK"
+	expect "copies deleted on leaving" wait_until not cached "$WORK/secret.zip"
+	expect "nothing decrypted left" not test -n "$(grep -rl "top secret" "$WORK/tmp/yazi-zipfs" 2>/dev/null)"
+	emit reveal "$WORK/secret.zip"
+	wait_until on_screen "secret.zip"
+	emit plugin zipfs
+	expect "asks again" password secret.zip sekrit
+	expect "entered" wait_until on_screen "archive://zip/"
+	emit reveal "$(mount "$WORK/secret.zip" note.txt)"
+	expect "preview works again" wait_until on_screen "top secret"
+}
+
 enc_zip_paste() {
 	emit reveal "$WORK/in/new.txt"
 	emit yank
-	emit cd "$(mount "$WORK/secret.zip")"
+	expect "unlocked" unlock "$WORK/secret.zip"
 	emit paste
 	expect "new.txt in the zip" wait_until has "$WORK/secret.zip" new.txt
 	expect "new.txt encrypted" test "$(field "$WORK/secret.zip" new.txt Encrypted)" = "+"
@@ -476,7 +505,6 @@ enc_zip_paste() {
 }
 
 enc_zip_save_back() {
-	emit cd "$(mount "$WORK/secret.zip")"
 	emit reveal "$(mount "$WORK/secret.zip" note.txt)"
 	wait_until on_screen "top secret"
 	emit open
@@ -500,7 +528,7 @@ enc_7z_enter() {
 enc_7z_edit() {
 	emit reveal "$WORK/in/new.txt"
 	emit yank
-	emit cd "$(mount "$WORK/locked.7z")"
+	expect "unlocked" unlock "$WORK/locked.7z"
 	emit paste
 	added() { test "$(field "$WORK/locked.7z" new.txt Encrypted)" = "+"; }
 	expect "new.txt added, encrypted" wait_until added
@@ -524,6 +552,35 @@ enc_clean_forgets() {
 	expect "entered" wait_until on_screen "archive://zip/"
 }
 
+# Quitting with `plugin zipfs quit` from inside locks the archive. Restarts Yazi.
+enc_quit_locks() {
+	emit reveal "$(mount "$WORK/secret.zip" note.txt)"
+	expect "preview" wait_until on_screen "top secret"
+	expect "copies while inside" wait_until cached "$WORK/secret.zip"
+	emit plugin zipfs quit
+	# Tasks left from earlier tests (the refused tar.gz delete) make Yazi ask first.
+	yazi_gone() { ! tmux -L "$SOCK" has-session -t e2e 2>/dev/null; }
+	asks() { yazi_gone || on_screen "[Y]es"; }
+	wait_until asks && ! yazi_gone && keys y
+	expect "Yazi quit" wait_until yazi_gone
+	expect "copies deleted on quit" not cached "$WORK/secret.zip"
+	start_yazi
+}
+
+# A Yazi killed while inside leaves copies; the next `l` on an archive removes them.
+enc_crash_sweep() {
+	expect "unlocked" unlock "$WORK/locked.7z"
+	emit reveal "$(mount "$WORK/locked.7z" new.txt)"
+	wait_until on_screen "pasted"
+	expect "copies while inside" cached "$WORK/locked.7z"
+	tmux -L "$SOCK" kill-server
+	sleep 0.5
+	expect "copies survive the crash" cached "$WORK/locked.7z"
+	start_yazi
+	enter "$WORK/work.zip"
+	expect "orphaned copies swept" wait_until not cached "$WORK/locked.7z"
+}
+
 # --- run ------------------------------------------------------------------------------
 
 start_yazi
@@ -531,7 +588,8 @@ for t in zip_browse zip_preview zip_copy_out zip_paste_in zip_paste_folder zip_o
 	zip_move_in zip_rename zip_create zip_delete zip_trash zip_save_back zip_clean_saves_edits \
 	sevenz_browse sevenz_edit tar_browse targz_browse tarzst_browse targz_read_only \
 	epub_browse macos_hidden macos_rename macos_delete test_ok test_inside test_damaged \
-	enc_zip_enter enc_zip_paste enc_zip_save_back enc_7z_enter enc_7z_edit enc_clean_forgets; do
+	enc_zip_enter enc_leave_locks enc_zip_paste enc_zip_save_back enc_7z_enter enc_7z_edit \
+	enc_clean_forgets enc_quit_locks enc_crash_sweep; do
 	run "$t"
 done
 

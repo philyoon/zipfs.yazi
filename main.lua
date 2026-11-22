@@ -26,6 +26,8 @@ local DIR_MODE, FILE_MODE = tonumber("40755", 8), tonumber("100644", 8)
 -- The fetcher extracts automatically up to this size; bigger entries are extracted only
 -- when opened, so scrolling past a 2 GB video doesn't stall.
 local AUTO_EXTRACT_MAX = 64 * 1024 * 1024
+-- In an encrypted archive, opening a folder extracts its files up to this much in total.
+local ENCRYPTED_FOLDER_MAX = 256 * 1024 * 1024
 
 -- Formats, matched on the lowercased file name. `type` is 7zz's -t for writing; formats
 -- without one are read-only (7zz can't write rar, nor delete from tar). `tar` marks a
@@ -82,10 +84,47 @@ local function err(kind, fmt, ...) return Error.fs { kind = kind, message = stri
 -- Passwords live in the plugin's state in Yazi's main Lua state, which outlives the fresh
 -- state each VFS call gets. They are never written to disk and go when Yazi quits.
 local get_password = ya.sync(function(st, archive) return st.passwords and st.passwords[archive] end)
+-- The archives open in some tab, as { [archive path] = true }.
+local function open_archives()
+	local open = {}
+	for i = 1, #cx.tabs do
+		local cwd = cx.tabs[i].current.cwd
+		if cwd.spec.scheme == SCHEME and cwd.base then
+			open[(tostring(cwd.base.path):gsub("/+$", ""))] = true
+		end
+	end
+	return open
+end
+
 local set_password = ya.sync(function(st, archive, pw)
 	st.passwords = st.passwords or {}
 	st.passwords[archive] = pw
+	st.locking = st.locking or {}
+	st.locking[archive] = nil
+	if pw and not st.watching then
+		-- Once no tab is inside an archive with a password, lock it: `plugin zipfs lock`
+		-- saves edits, deletes the decrypted copies and forgets the password. That is too
+		-- slow for this callback, so it runs as a plugin call of its own.
+		st.watching = true
+		ps.sub("cd", function()
+			local open = open_archives()
+			for a in pairs(st.passwords) do
+				if not open[a] and not st.locking[a] then
+					st.locking[a] = true
+					ya.emit("plugin", { "zipfs", "lock " .. ya.quote(a) })
+				end
+			end
+		end)
+	end
 end)
+local unlocked = ya.sync(function(st)
+	local out = {}
+	for a in pairs(st.passwords or {}) do
+		out[#out + 1] = a
+	end
+	return out
+end)
+local is_open = ya.sync(function(_, archive) return open_archives()[archive] == true end)
 local forget_passwords = ya.sync(function(st, keep)
 	local pw = keep and st.passwords and st.passwords[keep]
 	st.passwords = {}
@@ -457,6 +496,8 @@ local function index(archive)
 	idx.dir = dir
 	idx.tree = string.format("%s/%stree", cache_root(), archive_prefix(archive))
 	idx.entries[""].mtime = cha.mtime -- the archive root looks as new as the archive itself
+	local unlocked = fs.cha(Url(string.format("%s/%spid", cache_root(), archive_prefix(archive))))
+	idx.gen = unlocked and unlocked.mtime
 	return idx
 end
 
@@ -483,6 +524,9 @@ local function make_file(url, idx, inner)
 		mode = info.mode,
 		len = info.len,
 		mtime = info.mtime,
+		-- Each unlock of an encrypted archive is a new generation: its copies were deleted
+		-- when it was last locked, and a changed ctime makes Yazi fetch them again.
+		ctime = idx.gen or info.mtime,
 	}
 	local backing = inner == "" and idx.tree or idx.tree .. "/" .. inner
 	return File { url = url, cha = cha, backing = Path.os(backing) }, cha
@@ -1054,7 +1098,7 @@ function M:provide(job)
 		end
 		local new, cha = make_file(url, idx, inner)
 		local old = job.file.cha
-		if saved or old.mtime ~= cha.mtime or old.len ~= cha.len or old.mode ~= cha.mode then
+		if saved or old.mtime ~= cha.mtime or old.ctime ~= cha.ctime or old.len ~= cha.len or old.mode ~= cha.mode then
 			return new
 		end
 		return nil
@@ -1067,7 +1111,7 @@ function M:provide(job)
 		end
 		idx = settle(archive, idx, child_inners(idx, inner))
 
-		local list, stale = {}, {}
+		local list, stale, budget = {}, {}, ENCRYPTED_FOLDER_MAX
 		for _, name in ipairs(idx.children[inner] or {}) do
 			local child = inner == "" and name or inner .. "/" .. name
 			local file, cha = make_file(job.url:join(name), idx, child)
@@ -1079,6 +1123,10 @@ function M:provide(job)
 			local path = idx.tree .. "/" .. child
 			if not info.dir and fs.cha(Url(path)) and not extracted(path, info) then
 				stale[#stale + 1] = child
+			elseif idx.gen and not info.dir and info.len <= math.min(budget, AUTO_EXTRACT_MAX) and not fs.cha(Url(path)) then
+				-- An unlocked archive: its copies were deleted when it was last locked, and
+				-- Yazi won't fetch files it has seen before, so extract the folder here.
+				stale[#stale + 1], budget = child, budget - info.len
 			end
 		end
 		if #stale > 0 then
@@ -1276,6 +1324,73 @@ local current_archive = ya.sync(function()
 	end
 end)
 
+-- Yazi's pid, which spawned this command's shell. Marks whose decrypted copies these are.
+local function yazi_pid()
+	local out = Command("sh"):arg({ "-c", "echo $PPID" }):stdin(Command.NULL):stdout(Command.PIPED):output()
+	return out and out.stdout:match("%d+")
+end
+
+local function alive(pid)
+	local out = pid and Command("kill"):arg({ "-0", pid }):stdin(Command.NULL):stderr(Command.NULL):output()
+	return out ~= nil and out.status.success
+end
+
+local function owned_by(archive)
+	return string.format("%s/%spid", cache_root(), archive_prefix(archive))
+end
+
+-- Delete an archive's cache entries. With `keep_edits`, the tree (holding edits that could
+-- not be saved) stays, with the listing and tree.src that saving it later needs.
+local function purge(prefix, keep_edits)
+	for _, e in ipairs(cache_entries()) do
+		local rest = e.name:sub(1, #prefix) == prefix and e.name:sub(#prefix + 1)
+		local needed = rest == "tree" or rest == "tree.src" or (rest and rest:find("%.list$"))
+		if rest and not busy(e) and not (keep_edits and needed) then
+			fs.remove(e.cha.is_dir and "dir_all" or "file", e.url)
+		end
+	end
+end
+
+-- Leaving an encrypted archive: save edits, forget the password, then delete its decrypted
+-- copies and listing. Forgetting first means a preview racing with this can't decrypt a
+-- new copy. `force` skips the "still open in a tab" check (quitting).
+local function lock(archive, force)
+	if not force and is_open(archive) then
+		return set_password(archive, get_password(archive)) -- came back in meanwhile
+	end
+	local prefix = archive_prefix(archive)
+	local saved = save_tree(prefix)
+	set_password(archive, nil)
+	purge(prefix, not saved)
+	if not saved then
+		ya.notify {
+			title = "zipfs",
+			content = "Edits in " .. archive:match("[^/]+$") .. " could not be saved; their decrypted copies stay in the cache",
+			level = "warn",
+			timeout = 8,
+		}
+	end
+end
+
+-- Decrypted copies left by a Yazi that is gone (crashed, or its terminal closed).
+-- Edited copies are kept: entering that archive again saves them.
+local function sweep_orphans()
+	for _, e in ipairs(cache_entries()) do
+		local prefix = e.name:match("^(%x+%-)pid$")
+		if prefix and not alive((read_file(tostring(e.url)) or ""):match("%d+")) then
+			purge(prefix, not save_tree(prefix)) -- without the password, edits can't be saved
+		end
+	end
+end
+
+-- `plugin zipfs quit`: lock every encrypted archive, then quit.
+local function quit(job)
+	for _, archive in ipairs(unlocked()) do
+		lock(archive, true)
+	end
+	ya.emit("quit", { no_cwd_file = job.args.no_cwd_file or nil })
+end
+
 local function clean()
 	local root = cache_root()
 	-- Yazi doesn't re-detect MIME types after a clean, so previews in the zip you're in would
@@ -1413,6 +1528,7 @@ local function ask_password(archive)
 		set_password(archive, pw)
 		local ok, e = check_password(archive)
 		if ok then
+			write_atomic(owned_by(archive), yazi_pid() or "")
 			return true
 		end
 		set_password(archive, nil)
@@ -1432,12 +1548,17 @@ function M:entry(job)
 		return clean()
 	elseif job.args[1] == "test" then
 		return test()
+	elseif job.args[1] == "lock" and job.args[2] then
+		return lock(job.args[2])
+	elseif job.args[1] == "quit" then
+		return quit(job)
 	end
 
 	local h = hovered()
 
 	if h and h.is_regular and format_of(h.url) then
 		touch(h.url)
+		sweep_orphans()
 		local need, idx = needs_password(h.url)
 		if need and not ask_password(h.url) and not idx then
 			return -- even the names are encrypted: nothing to show without the password
