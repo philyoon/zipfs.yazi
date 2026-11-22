@@ -557,6 +557,7 @@ enc_7z_enter() {
 	wait_until on_screen "locked.7z"
 	emit plugin zipfs
 	expect "asks for the password" password locked.7z sekrit
+	expect "inside" wait_until on_screen "archive://zip/"
 	expect "names listed" wait_until on_screen "note.txt"
 	emit cd "$(mount "$WORK/locked.7z" d)"
 	emit reveal "$(mount "$WORK/locked.7z" d/x.txt)"
@@ -813,6 +814,7 @@ pack_extract_gz() {
 	emit plugin zipfs extract
 	expect "the file inside comes out" wait_until test -f "$WORK/note.txt"
 	expect "decompressed" grep -q "gzipped note" "$WORK/note.txt"
+	rm -f "$WORK/note.txt" # enc_7z_enter looks for a note.txt on screen
 }
 
 # The cache holds decrypted copies, so only its owner may read it.
