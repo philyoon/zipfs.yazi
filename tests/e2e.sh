@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end tests: run a real Yazi in a detached tmux session and drive it with
-# `ya emit-to`, then check the archives with 7zz. Needs yazi + ya, 7zz, tmux, tar, zstd.
+# `ya emit-to`, then check the archives with 7zz. Needs yazi + ya, 7zz, tmux, tar, zstd, fzf.
 #
 #   tests/e2e.sh            run every test
 #   tests/e2e.sh zip_       run tests whose name starts with zip_
@@ -77,6 +77,13 @@ echo "nested a" >"$WORK/src/d/a.txt"
 echo "korean" >"$WORK/src/한글폴더/파일.txt"
 # Files to paste in
 echo "pasted v1" >"$WORK/in/new.txt"
+# Finder litter for compress to leave out, and a file compressed on its own.
+mkdir -p "$WORK/junk/sub"
+echo "real" >"$WORK/junk/a.txt"
+echo "x" >"$WORK/junk/.DS_Store"
+echo "x" >"$WORK/junk/._a.txt"
+echo "x" >"$WORK/junk/sub/.DS_Store"
+echo "gzipped note" | gzip >"$WORK/note.txt.gz"
 echo "move me" >"$WORK/in/move.txt"
 echo "deep" >"$WORK/in/folder/sub/n.txt"
 
@@ -787,6 +794,86 @@ pack_extract_encrypted() {
 	rm -rf "$WORK/secret"
 }
 
+pack_compress_junk() {
+	emit cd "$WORK"
+	emit reveal "$WORK/junk"
+	wait_until on_screen "junk"
+	emit plugin zipfs compress
+	wait_until on_screen "junk.zip"
+	keys Enter
+	expect "junk.zip made" wait_until has "$WORK/junk.zip" junk/a.txt
+	expect "no .DS_Store" not eval '7zz l -ba "$WORK/junk.zip" | grep -q DS_Store'
+	expect "no ._ files" not has "$WORK/junk.zip" junk/._a.txt
+}
+
+pack_extract_gz() {
+	emit cd "$WORK"
+	emit reveal "$WORK/note.txt.gz"
+	wait_until on_screen "note.txt.gz"
+	emit plugin zipfs extract
+	expect "the file inside comes out" wait_until test -f "$WORK/note.txt"
+	expect "decompressed" grep -q "gzipped note" "$WORK/note.txt"
+}
+
+# The cache holds decrypted copies, so only its owner may read it.
+cache_private() {
+	expect "cache folder is 0700" test "$(ls -ld "$WORK/tmp/yazi-zipfs" | cut -c1-10)" = "drwx------"
+}
+
+saveas_convert() {
+	emit cd "$WORK"
+	emit reveal "$WORK/work.tar.gz"
+	wait_until on_screen "work.tar.gz"
+	emit plugin zipfs save-as
+	expect "asks for the name" wait_until on_screen "Save as:"
+	keys C-u conv.7z Enter
+	wait_until on_screen "empty for none"
+	keys Enter
+	expect "converted to 7z" wait_until has "$WORK/conv.7z" d/a.txt
+	expect "Korean names kept" has "$WORK/conv.7z" 한글폴더/파일.txt
+}
+
+saveas_add_password() {
+	emit reveal "$WORK/work.7z"
+	wait_until on_screen "work.7z"
+	emit plugin zipfs save-as
+	wait_until on_screen "Save as:"
+	keys C-u enc.zip Enter
+	wait_until on_screen "empty for none"
+	keys sekrit Enter
+	wait_until on_screen "Password again"
+	keys sekrit Enter
+	expect "enc.zip encrypted" wait_until eval '[ "$(field "$WORK/enc.zip" keep.txt Encrypted)" = "+" ]'
+}
+
+saveas_remove_password() {
+	restart_yazi
+	emit cd "$WORK"
+	emit reveal "$WORK/secret.zip"
+	wait_until on_screen "secret.zip"
+	emit plugin zipfs save-as
+	password secret.zip sekrit
+	wait_until on_screen "Save as:"
+	keys C-u plain.zip Enter
+	wait_until on_screen "empty for none"
+	keys Enter
+	expect "asks before dropping the password" wait_until on_screen "Save without a password?"
+	keys y Enter
+	opens() { 7zz e -so "$WORK/plain.zip" note.txt </dev/null 2>/dev/null | grep -q "top secret"; }
+	expect "plain.zip opens without a password" wait_until opens
+	expect "source locked again" wait_until not cached "$WORK/secret.zip"
+}
+
+find_entry() {
+	enter "$WORK/work.zip"
+	emit plugin zipfs find
+	expect "fzf lists the entries" wait_until on_screen "work.zip>"
+	keys a.txt
+	sleep 0.5
+	keys Enter
+	expect "goes to the entry's folder" wait_until on_screen "work.zip/d"
+}
+
 # --- run ------------------------------------------------------------------------------
 
 start_yazi
@@ -796,6 +883,7 @@ ALL="zip_browse zip_preview zip_copy_out zip_paste_in zip_paste_folder zip_overw
 	epub_browse macos_hidden macos_rename macos_delete test_ok test_inside test_damaged \
 	pack_compress_zip pack_compress_selected pack_overwrite pack_compress_tarzst pack_compress_encrypted pack_extract_folder \
 	pack_extract_selected pack_extract_single pack_extract_macos pack_extract_tarzst pack_extract_opener pack_extract_encrypted \
+	pack_compress_junk pack_extract_gz cache_private saveas_convert saveas_add_password saveas_remove_password find_entry \
 	enc_zip_enter enc_leave_locks enc_zip_paste enc_zip_save_back enc_7z_enter enc_7z_edit \
 	enc_clean_forgets enc_zipcrypto_open enc_open_cancel enc_quit_locks enc_crash_sweep"
 for t in ${E2E_TESTS:-$ALL}; do

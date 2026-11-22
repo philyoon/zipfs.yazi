@@ -279,6 +279,20 @@ do
   } do
     eq("kind_of " .. name, P.kind_of(name), want)
   end
+  for name, want in pairs {
+    ["notes.txt.gz"] = true,
+    ["dump.SQL.XZ"] = true,
+    ["a.zst"] = true,
+    ["old.Z"] = true,
+    ["a.tar.gz"] = false, -- a compressed tar, extracted as an archive
+    ["a.tgz"] = false,
+    ["a.zip"] = false,
+    ["a.zipx"] = false,
+  } do
+    eq("is_single " .. name, P.is_single(name), want)
+  end
+  eq("junk all", table.concat(P.junk_excludes { "/a/folder" }, ","), ".DS_Store,._*,Icon\r")
+  eq("junk picked", table.concat(P.junk_excludes { "/a/folder", "/a/.DS_Store", "/a/._x" }, ","), "Icon\r")
 end
 
 print(string.format("%d passed, %d failed", passed, failed))

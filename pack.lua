@@ -1,11 +1,13 @@
---- `plugin zipfs compress` and `plugin zipfs extract`: make and unpack archives. zip and 7z
---- are made with 7zz, compressed tars with the system `tar` (7zz can't write zstd, and tar
---- picks the compression from the name). Loaded only by those two commands.
+--- `plugin zipfs compress`, `extract`, `save-as` and `find`: make, unpack, convert and
+--- search archives. zip and 7z are made with 7zz, tars with the system `tar` (7zz can't
+--- write zstd, and tar picks the compression from the name). Loaded only by these commands.
 
 local state = require(".state")
-local targets = state.targets
+local SCHEME, DOMAIN, targets, get_password, set_password, current_archive =
+  state.SCHEME, state.DOMAIN, state.targets, state.get_password, state.set_password, state.current_archive
 local core = require(".core")
-local FORMATS, format_of, exec, err, source = core.FORMATS, core.format_of, core.exec, core.err, core.source
+local FORMATS, format_of, exec, err, source, index =
+  core.FORMATS, core.format_of, core.exec, core.err, core.source, core.index
 
 -- Yazi shows three messages at a time and queues the rest, so each command shows one, and
 -- success is brief.
@@ -87,20 +89,112 @@ local function kind_of(name)
   return f and f.type
 end
 
-local function ask_new_password()
-  local pw, event =
-    ya.input { title = "Password for the new archive:", obscure = true, pos = { "top-center", y = 3, w = 50 } }
+-- A file compressed on its own, not a tar: "notes.txt.gz". 7zz unpacks these to the one
+-- file inside. (Compressed tars match FORMATS first.)
+local SINGLES = { "%.gz$", "%.bz2$", "%.xz$", "%.zst$", "%.lzma$", "%.z$" }
+
+local function is_single(name)
+  local lower = name:lower()
+  if format_of(lower) then
+    return false
+  end
+  for _, p in ipairs(SINGLES) do
+    if lower:find(p) then
+      return true
+    end
+  end
+  return false
+end
+
+-- Finder litter left out of the folders you compress. A file with one of these names that
+-- you selected yourself still goes in, so its pattern is dropped then.
+local JUNK = { ".DS_Store", "._*", "Icon\r" }
+
+local function junk_excludes(paths)
+  local out = {}
+  for _, pat in ipairs(JUNK) do
+    local picked = false
+    for _, p in ipairs(paths) do
+      local b = base(p)
+      picked = picked or b == pat or (pat == "._*" and b:sub(1, 2) == "._")
+    end
+    if not picked then
+      out[#out + 1] = pat
+    end
+  end
+  return out
+end
+
+-- Pack `paths` into `out` (a temporary name; the caller renames it into place). `pw`
+-- encrypts a zip (AES-256) or 7z (names too). Returns nil or an error.
+local function build(kind, out, paths, pw, excludes)
+  if kind == "tar" then
+    local cmd = Command("tar"):arg({ "-caf", out }):env("COPYFILE_DISABLE", "1") -- no ._ files on macOS
+    for _, x in ipairs(excludes) do
+      cmd:arg { "--exclude", x } -- GNU tar wants these before the files
+    end
+    for _, p in ipairs(paths) do
+      cmd:arg { "-C", dir(p), base(p) }
+    end
+    return spawn(cmd)
+  end
+  local args = { "a", "-t" .. kind, "-sccUTF-8" }
+  if pw then
+    args[#args + 1] = "-p"
+    args[#args + 1] = kind == "zip" and "-mem=AES256" or "-mhe=on"
+  end
+  for _, x in ipairs(excludes) do
+    args[#args + 1] = "-xr!" .. x
+  end
+  args[#args + 1] = out
+  args[#args + 1] = "--"
+  for _, p in ipairs(paths) do
+    args[#args + 1] = p
+  end
+  return spawn(Command("7zz"):arg(args), pw)
+end
+
+-- Build beside `out` and rename over it: 7zz would add to an existing archive instead of
+-- replacing it, and a failed run leaves nothing half-written.
+local function build_into(kind, out, paths, pw, excludes)
+  local tmp = string.format("%s/.zipfs-%d%d-%s", dir(out), os.time(), math.random(1e6), base(out))
+  local e = build(kind, tmp, paths, pw, excludes)
+  if not e then
+    local ok, why = os.rename(tmp, out)
+    e = not ok and err("Other", "%s", why) or nil
+  end
+  if e then
+    os.remove(tmp)
+  end
+  return e
+end
+
+local function confirm(question)
+  local answer, event = ya.input { title = question .. " (y/N)", pos = { "top-center", y = 3, w = 50 } }
+  return event == 1 and answer:lower() == "y"
+end
+
+-- Ask for a new password, twice. With `optional`, an empty one means none (returns "").
+local function ask_new_password(verb, optional)
+  local pw, event = ya.input {
+    title = "Password for the new archive" .. (optional and " (empty for none):" or ":"),
+    obscure = true,
+    pos = { "top-center", y = 3, w = 50 },
+  }
   if event ~= 1 then
     return nil
   elseif pw == "" then
-    return nil, "Not created: the password is empty"
+    if optional then
+      return ""
+    end
+    return nil, "Not " .. verb .. ": the password is empty"
   end
   local again
   again, event = ya.input { title = "Password again:", obscure = true, pos = { "top-center", y = 3, w = 50 } }
   if event ~= 1 then
     return nil
   elseif again ~= pw then
-    return nil, "Not created: the passwords differ"
+    return nil, "Not " .. verb .. ": the passwords differ"
   end
   return pw
 end
@@ -136,75 +230,54 @@ local function compress(job)
       return notify("Not created: only zip and 7z can be encrypted", "warn")
     end
     local why
-    pw, why = ask_new_password()
+    pw, why = ask_new_password("created")
     if not pw then
       return why and notify(why, "warn")
     end
   end
 
-  if exists(out) then
-    local answer, ev =
-      ya.input { title = "Overwrite " .. base(out) .. "? (y/N)", pos = { "top-center", y = 3, w = 50 } }
-    if ev ~= 1 or answer:lower() ~= "y" then
-      return
-    end
+  if exists(out) and not confirm("Overwrite " .. base(out) .. "?") then
+    return
   end
-
-  -- Build beside the target and rename over it: 7zz would add to an existing archive
-  -- instead of replacing it, and a failed run leaves nothing half-written.
-  local tmp = string.format("%s/.zipfs-%d%d-%s", dir(out), os.time(), math.random(1e6), base(out))
-  local e
-  if kind == "tar" then
-    local cmd = Command("tar"):arg({ "-caf", tmp }):env("COPYFILE_DISABLE", "1") -- no ._ files on macOS
-    for _, p in ipairs(t.paths) do
-      cmd:arg { "-C", dir(p), base(p) }
-    end
-    e = spawn(cmd)
-  else
-    local args = { "a", "-t" .. kind, "-sccUTF-8" }
-    if pw then
-      args[#args + 1] = "-p"
-      args[#args + 1] = kind == "zip" and "-mem=AES256" or "-mhe=on"
-    end
-    args[#args + 1] = tmp
-    args[#args + 1] = "--"
-    for _, p in ipairs(t.paths) do
-      args[#args + 1] = p
-    end
-    e = spawn(Command("7zz"):arg(args), pw)
-  end
-
-  if not e then
-    local ok, why = os.rename(tmp, out)
-    e = not ok and err("Other", "%s", why)
-  end
+  local e = build_into(kind, out, t.paths, pw, junk_excludes(t.paths))
   if e then
-    os.remove(tmp)
     return notify("Could not create " .. base(out) .. ": " .. tostring(e), "error")
   end
   notify("Created " .. base(out))
 end
 
--- Unpack `archive` next to itself. Into a temporary folder first: an archive with one
--- top-level item yields just that item, one with more gets a folder named after it.
--- Returns the message to show and its level.
-local function unpack(archive)
+-- Extract all of `archive` into a new temporary folder beside `near`. `meta` keeps Finder
+-- metadata (__MACOSX/, ._name), which is otherwise left out as it is hidden when browsing.
+-- Returns the folder and its items, or nil and an error.
+local function unpack_to(archive, near, meta)
   local src, e = source(archive) -- a compressed tar is decompressed into the cache first
   if not src then
-    return "Could not extract " .. base(archive) .. ": " .. tostring(e), "error"
+    return nil, e
   end
-  local folder = dir(archive)
-  local tmp = string.format("%s/.zipfs-extract-%d%d", folder, os.time(), math.random(1e6))
-  -- Finder metadata (__MACOSX/, ._name) is left out, as it is hidden when browsing.
+  local tmp = string.format("%s/.zipfs-extract-%d%d", dir(near), os.time(), math.random(1e6))
+  local args = { "x", "-y", "-sccUTF-8", "-o" .. tmp }
+  if not meta then
+    args[#args + 1] = "-xr!__MACOSX"
+    args[#args + 1] = "-xr!._*"
+  end
+  args[#args + 1] = src
   local _
-  _, e = exec({ "x", "-y", "-sccUTF-8", "-o" .. tmp, "-xr!__MACOSX", "-xr!._*", src }, archive)
+  _, e = exec(args, archive)
   if e then
     fs.remove("dir_all", Url(tmp))
-    return "Could not extract " .. base(archive) .. ": " .. tostring(e), "error"
+    return nil, e
   end
+  return tmp, fs.read_dir(Url(tmp), { resolve = true }) or {}
+end
 
-  local items = fs.read_dir(Url(tmp), { resolve = true }) or {}
-  local result
+-- Unpack `archive` next to itself. An archive with one top-level item yields just that
+-- item, one with more gets a folder named after it. Returns the message and its level.
+local function unpack(archive)
+  local tmp, items = unpack_to(archive, archive, false)
+  if not tmp then
+    return "Could not extract " .. base(archive) .. ": " .. tostring(items), "error"
+  end
+  local folder, result = dir(archive), nil
   if #items == 0 then
     fs.remove("dir", Url(tmp))
     return base(archive) .. " is empty", "warn"
@@ -219,8 +292,9 @@ local function unpack(archive)
   return "Extracted " .. base(archive) .. " to " .. result
 end
 
--- `plugin zipfs extract`: unpack the selected archives (or the hovered one) next to them.
--- `cmds` brings the password prompt and the lock from cmds.lua.
+-- `plugin zipfs extract`: unpack the selected archives (or the hovered one) next to them,
+-- and files compressed on their own (.gz, .xz, ...). `cmds` brings the password prompt and
+-- the lock from cmds.lua.
 local function extract(_, cmds)
   ya.emit("escape", { visual = true })
   local lines, worst, skipped = {}, nil, 0
@@ -231,7 +305,9 @@ local function extract(_, cmds)
     end
   end
   for _, p in ipairs(targets().paths) do
-    if not (p and format_of(p)) then
+    if p and is_single(p) then
+      report(unpack(p))
+    elseif not (p and format_of(p)) then
       skipped = skipped + 1
     elseif not cmds.needs_password(p) then
       report(unpack(p))
@@ -256,9 +332,138 @@ local function extract(_, cmds)
   end
 end
 
+-- `plugin zipfs save-as`: write the hovered archive, or the one you are in, into a new
+-- one: another format, another password, or none. Everything goes along, Finder metadata
+-- included. `cmds` brings the target, the password prompt and the lock from cmds.lua.
+local function save_as(_, cmds)
+  local archive = cmds.test_target()
+  if not archive then
+    return notify("Hover an archive or enter one first", "warn")
+  end
+  local asked = false -- unlocked only for this, so locked again at the end
+  if cmds.needs_password(archive) then
+    local ok, cancelled = cmds.ask_password(archive)
+    if not ok then
+      return cancelled and notify("Not saved: " .. base(archive) .. " needs the password", "warn")
+    end
+    asked = true
+  end
+  local function finish(msg, level)
+    if asked then
+      cmds.lock(archive)
+    end
+    if msg then
+      notify(msg, level)
+    end
+  end
+
+  local name = stem(base(archive))
+  local default = name .. ".zip"
+  if dir(archive) .. "/" .. default == archive then
+    default = name .. "-copy.zip"
+  end
+  local input, event = ya.input { title = "Save as:", value = default, pos = { "top-center", y = 3, w = 50 } }
+  if event ~= 1 or input == "" then
+    return finish()
+  end
+  local out = input:sub(1, 1) == "/" and input or dir(archive) .. "/" .. input
+  local kind = kind_of(base(out))
+  if not kind then
+    return finish("Not saved: end the name in .zip, .7z, .tar, .tar.gz, .tar.bz2, .tar.xz or .tar.zst", "warn")
+  end
+
+  local was_encrypted = get_password(archive) ~= nil
+  local pw = ""
+  if kind ~= "tar" then
+    local why
+    pw, why = ask_new_password("saved", true)
+    if not pw then
+      return finish(why, "warn")
+    end
+  end
+  if pw == "" and was_encrypted and not confirm("Save without a password?") then
+    return finish()
+  end
+  if exists(out) and not confirm("Overwrite " .. base(out) .. "?") then
+    return finish()
+  end
+
+  -- Edits not yet saved into the archive go along.
+  local idx = index(archive)
+  if idx and core.writable(archive) then
+    require(".edit").settle(archive, idx, nil)
+  end
+  local tmp, items = unpack_to(archive, out, true)
+  if not tmp then
+    return finish("Could not save " .. base(out) .. ": " .. tostring(items), "error")
+  elseif #items == 0 then
+    fs.remove("dir", Url(tmp))
+    return finish(base(archive) .. " is empty", "warn")
+  end
+  local paths = {}
+  for i, it in ipairs(items) do
+    paths[i] = tostring(it.url)
+  end
+  local e = build_into(kind, out, paths, pw ~= "" and pw or nil, {})
+  fs.remove("dir_all", Url(tmp))
+  if e then
+    return finish("Could not save " .. base(out) .. ": " .. tostring(e), "error")
+  end
+  if out == archive and not asked then
+    set_password(archive, pw ~= "" and pw or nil) -- you are inside: keep it browsable
+  end
+  finish(out == archive and "Saved " .. base(out) or "Saved " .. base(archive) .. " as " .. base(out))
+end
+
+-- `plugin zipfs find`: pick any entry of the archive you are in with fzf, and go to it.
+local function find()
+  local archive = current_archive()
+  if not archive then
+    return notify("Enter an archive first", "warn")
+  end
+  local idx, e = index(archive)
+  if not idx then
+    return notify(tostring(e), "error")
+  end
+  local list = {}
+  for path, info in pairs(idx.entries) do
+    if path ~= "" then
+      list[#list + 1] = info.dir and path .. "/" or path
+    end
+  end
+  table.sort(list)
+
+  local permit = ui.hide()
+  local child, why =
+    Command("fzf"):arg({ "--prompt", base(archive) .. "> " }):stdin(Command.PIPED):stdout(Command.PIPED):spawn()
+  local out
+  if child then
+    child:write_all(table.concat(list, "\n") .. "\n")
+    child:flush()
+    out = child:wait_with_output()
+  end
+  permit:drop()
+  if not child then
+    return notify("find needs fzf in PATH: " .. tostring(why), "error")
+  end
+  local pick = out and out.stdout:gsub("%s+$", ""):gsub("/$", "")
+  if not pick or pick == "" or not idx.entries[pick] then
+    return -- cancelled
+  end
+  local url = Url(string.format("%s://%s/%s", SCHEME, DOMAIN, archive))
+  for part in pick:gmatch("[^/]+") do
+    url = url:join(part)
+  end
+  ya.emit("reveal", { url })
+end
+
 return {
   stem = stem,
   kind_of = kind_of,
+  is_single = is_single,
+  junk_excludes = junk_excludes,
   compress = compress,
   extract = extract,
+  save_as = save_as,
+  find = find,
 }

@@ -329,8 +329,11 @@ local function entry(job)
     return quit(job)
   elseif job.args[1] == "compress" then
     return require(".pack").compress(job)
-  elseif job.args[1] == "extract" then
-    return require(".pack").extract(job, { needs_password = needs_password, ask_password = ask_password, lock = lock })
+  elseif job.args[1] == "extract" or job.args[1] == "save-as" then
+    local api = { needs_password = needs_password, ask_password = ask_password, lock = lock, test_target = test_target }
+    return require(".pack")[job.args[1] == "extract" and "extract" or "save_as"](job, api)
+  elseif job.args[1] == "find" then
+    return require(".pack").find()
   end
 
   local h = hovered()

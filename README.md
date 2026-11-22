@@ -3,7 +3,8 @@
 [![test](https://github.com/philyoon/zipfs.yazi/actions/workflows/test.yml/badge.svg)](https://github.com/philyoon/zipfs.yazi/actions/workflows/test.yml)
 
 A lightweight, 7zz-based archive filesystem for Yazi: enter zip, 7z, rar and tar files as
-folders, edit zip and 7z in place, and compress and extract (encrypted archives included).
+folders, edit zip and 7z in place, search them, and compress, extract and convert them
+(encrypted archives included).
 
 Plain Lua and `7zz`, nothing else to build or install. It uses Yazi's custom VFS
 (`kind = "mount"`), so inside an archive Yazi's normal keys just work: preview, open, copy,
@@ -82,6 +83,8 @@ them encrypted.
 - The password stays in Yazi's memory only. It reaches `7zz` on stdin, never on the command
   line.
 - Extracted copies in the cache are decrypted, so they live only while you are inside.
+  The cache folder is private (0700); without `TMPDIR` it is `/tmp/yazi-zipfs-$USER`, and
+  zipfs refuses one there that belongs to someone else.
 - Leaving the archive (no tab is inside it any more) locks it: edits are saved, the
   decrypted copies and the listing are deleted, and the password is forgotten. Entering
   again asks again.
@@ -104,10 +107,24 @@ them encrypted.
   `.7z` instead. Existing files are replaced only after you confirm.
 - `plugin zipfs -- compress --encrypt` asks for a password (twice) and encrypts the zip
   (AES-256) or 7z (file names too).
+- Finder litter inside the folders you compress (`.DS_Store`, `._name`, `Icon\r`) is left
+  out. A file of that name you select yourself still goes in.
 - `plugin zipfs extract` unpacks the selected archives (or the hovered one) beside them,
   asking for the password when needed. An archive with a single top-level item yields just
   that item; one with more gets a folder named after the archive. Names already taken get
-  " (1)", " (2)", ... Finder metadata (`__MACOSX/`, `._name`) is left out.
+  " (1)", " (2)", ... Finder metadata (`__MACOSX/`, `._name`) is left out. Files
+  compressed on their own (`.gz`, `.bz2`, `.xz`, `.zst`, `.lzma`, `.Z`) come out as the
+  file inside.
+- `plugin zipfs save-as` writes the hovered archive, or the one you are in, into a new one:
+  any readable format (rar, iso, tar.gz, ...) into zip, 7z or a tar, with a new password,
+  or none (it asks before dropping one). Everything goes along, Finder metadata included,
+  and edits not yet saved into the archive too. Saving under the archive's own name
+  replaces it, which is how you change its password.
+
+### Find
+
+`plugin zipfs find`, inside an archive, lists every file and folder in it with
+[fzf](https://github.com/junegunn/fzf), at any depth, and goes to the one you pick.
 
 zip and 7z are made with `7zz`, tars with the system `tar` (7zz can't write zstd). Both
 build into a temporary name first, so a failed run leaves nothing half-written.
@@ -121,6 +138,7 @@ task list (`w`).
 
 - `7zz` in `PATH`: `brew install sevenzip` on macOS; on Linux, the `7zip` package (link its
   `7z` as `7zz` if it doesn't install one). Yazi's own archive previewer uses it too.
+- For `plugin zipfs find`: `fzf`.
 - For trash (`d`), one of: `trash` (built into macOS 14+, or trash-cli on Linux), `gio`
   (GLib), or `trash-put` (trash-cli). Without any of them, `D` still deletes.
 
@@ -176,6 +194,16 @@ on   = "C"
 run  = "plugin zipfs compress"
 desc = "Compress into an archive"
 
+[[mgr.prepend_keymap]]
+on   = ["g", "s"]
+run  = "plugin zipfs save-as"
+desc = "Save the archive as another format or password"
+
+[[mgr.prepend_keymap]]
+on   = ["g", "/"]
+run  = "plugin zipfs find"
+desc = "Find a file in the archive"
+
 # Locks encrypted archives (deletes their decrypted copies) before quitting.
 [[mgr.prepend_keymap]]
 on   = "q"
@@ -201,7 +229,7 @@ extract = [{ run = "ya emit plugin zipfs extract", desc = "Extract here", for = 
 - The code is split by who needs it: `main.lua` answers Yazi's VFS calls and the fetcher
   with `core.lua` (formats, 7zz, cache, listings, extraction) and `edit.lua` (changes);
   `cmds.lua` holds what only `plugin zipfs` runs (entering, passwords, locking, cleanup),
-  so VFS calls don't load it; `pack.lua` holds compress and extract. `state.lua` holds every `ya.sync`, since each file gets its
+  so VFS calls don't load it; `pack.lua` holds compress, extract, save-as and find. `state.lua` holds every `ya.sync`, since each file gets its
   own plugin state.
 - URLs look like `archive://zip//abs/path/to/file.7z/inner/path` (the mount is called
   `zip` whatever the format).
@@ -248,7 +276,7 @@ stylua .             # format (stylua.toml: Yazi's settings, 2-space indent)
 tests/e2e.sh         # a real Yazi in tmux, driven with `ya emit-to`
 ```
 
-The end-to-end tests need `yazi`, `ya`, `7zz`, `tmux` and `zstd`, and run everything in a
+The end-to-end tests need `yazi`, `ya`, `7zz`, `tmux`, `zstd` and `fzf`, and run everything in a
 temp folder: their own Yazi config, plugin cache and archives, plus stub `trash` and editor
 commands. `tests/e2e.sh zip_` runs only the tests whose names start with `zip_`;
 `E2E_KEEP=1` keeps the temp folder. CI runs both on Ubuntu and macOS with Yazi 26.9.1.
@@ -256,7 +284,7 @@ commands. `tests/e2e.sh zip_` runs only the tests whose names start with `zip_`;
 ## See also
 
 [zippity](https://github.com/hawkff/zippity) covers far more (dmg and disk images, nested
-archives, split volumes, creating and re-encrypting archives) with a Rust helper and
+archives, split volumes, compression settings, Finder tags) with a Rust helper and
 explicit edit sessions.
 zipfs stays small: plain Lua, Yazi's own keys, and edits that apply at once.
 

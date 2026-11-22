@@ -126,9 +126,36 @@ end
 -- Every provide() call runs in a fresh Lua state, so nothing survives in memory between
 -- calls. The listing and extracted files live on disk instead, under a folder keyed by the
 -- archive's path, size and mtime, so editing the archive starts a fresh cache.
+--
+-- The cache holds decrypted copies, so it is private (0700). macOS's TMPDIR is per user
+-- already; a shared /tmp (Linux without TMPDIR) gets a per-user name, and a folder there
+-- that someone else made is refused rather than written into.
+local root_checked = false
 local function cache_root()
-  local base = os.getenv("TMPDIR") or "/tmp/"
-  return (base:sub(-1) == "/" and base or base .. "/") .. "yazi-zipfs"
+  local tmpdir = os.getenv("TMPDIR")
+  local base = tmpdir or "/tmp/"
+  local root = (base:sub(-1) == "/" and base or base .. "/")
+    .. "yazi-zipfs"
+    .. (tmpdir and "" or "-" .. (os.getenv("USER") or "user"))
+  if not root_checked then
+    root_checked = true
+    -- Every VFS call is a fresh Lua state, so the quick check is a stat. A 0700 folder that
+    -- isn't ours is safe too: nothing can be written into it.
+    local cha = fs.cha(Url(root))
+    if cha and cha.is_dir and not cha.is_link and cha:perm() == "drwx------" then
+      return root
+    end
+    local out = Command("sh")
+      :arg({ "-c", 'mkdir -p -m 700 "$1" && test -O "$1" && test ! -L "$1" && chmod 700 "$1"', "sh", root })
+      :stdin(Command.NULL)
+      :stdout(Command.NULL)
+      :stderr(Command.NULL)
+      :output()
+    if not (out and out.status.success) then
+      error("zipfs: the cache folder " .. root .. " is not yours, or can't be made private")
+    end
+  end
+  return root
 end
 
 -- Cache layout, per archive (<p> = hash of the archive's path):

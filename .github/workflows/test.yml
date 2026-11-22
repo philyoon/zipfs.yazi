@@ -40,12 +40,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install tmux and zstd
+      - name: Install tmux, zstd and fzf
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
-            sudo apt-get update && sudo apt-get install -y tmux zstd file
+            sudo apt-get update && sudo apt-get install -y tmux zstd file fzf
           else
-            brew install tmux zstd
+            brew install tmux zstd fzf
           fi
 
       - name: Install Yazi
