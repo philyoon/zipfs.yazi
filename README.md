@@ -48,6 +48,7 @@ as much disk space; later visits are fast.
   inside. Folders and binary files work. A cut removes the source only after the copy
   succeeded.
 - Save opened files back into zip and 7z (see below).
+- Encrypted zip and 7z, including 7z with encrypted file names (see below).
 
 Each edit rewrites the whole archive (that is how zip and 7z work), so on a large archive
 every edit takes a moment. Deleting a folder with `D` rewrites it once per file inside;
@@ -69,6 +70,21 @@ zipfs adds it back into the archive the next time Yazi looks at its folder:
 If the archive itself changes after you opened a file and ends up newer than your edit, the
 archive wins and the edited copy is replaced. In read-only formats an edit stays in the
 cached copy only.
+
+### Encrypted archives
+
+Pressing `l` on an encrypted archive asks for its password, and so does opening an
+encrypted file inside when zipfs doesn't have it yet. A wrong password gets two more
+tries. Then everything works as usual, edits included: added and saved files are
+encrypted with the same password, AES zips stay AES, and a 7z with encrypted names keeps
+them encrypted.
+
+- The password stays in Yazi's memory only. It reaches `7zz` on stdin, never on the command
+  line, and is forgotten when Yazi quits or the cache is cleaned (`g z`).
+- Extracted copies in the cache are decrypted, like any extracted file. `g z` removes them.
+- An archive entered another way than `l` (for example `cd`) is listed, but its files
+  can't be previewed until you enter it with `l` or open one of them.
+- One password per archive: files with different passwords in one zip are not supported.
 
 If a paste fails (for example the archive's folder is read-only), Yazi's task stays at
 "0% - 0B / 0B" instead of reporting an error. It does the same for a read-only plain folder.
@@ -162,7 +178,6 @@ desc = "Check the archive for damage"
 ## Limits
 
 - Nested archives are not entered (a zip inside a zip opens with your opener instead).
-- Encrypted archives and entries are not supported.
 - A file of your own named `._something` inside an archive is hidden like Finder metadata.
 - Every VFS call re-reads the cached listing (Yazi gives each call a fresh Lua state), so
   very large archives (tens of thousands of entries) will feel slower.
@@ -184,8 +199,9 @@ commands. `tests/e2e.sh zip_` runs only the tests whose names start with `zip_`;
 
 ## See also
 
-[zippity](https://github.com/hawkff/zippity) covers far more formats (ISO, dmg, nested
-archives, encryption, creating archives) with a Rust helper and explicit edit sessions.
+[zippity](https://github.com/hawkff/zippity) covers far more (dmg and disk images, nested
+archives, split volumes, creating and re-encrypting archives) with a Rust helper and
+explicit edit sessions.
 zipfs stays small: one Lua file, Yazi's own keys, and edits that apply at once.
 
 ## License

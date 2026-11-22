@@ -39,7 +39,7 @@ local function listing(blocks)
 	local out = {}
 	for _, b in ipairs(blocks) do
 		local lines = {}
-		for _, k in ipairs { "Path", "Folder", "Size", "Modified", "Attributes" } do
+		for _, k in ipairs { "ZipfsLocked", "Path", "Folder", "Size", "Modified", "Attributes", "Encrypted", "Method" } do
 			if b[k] then
 				lines[#lines + 1] = k .. " = " .. b[k]
 			end
@@ -208,6 +208,35 @@ do
 	eq("folder companions renamed", names(c, 2), "__MACOSX/._e,__MACOSX/e")
 	eq("nested file companions", names(T.companions(idx, "d2/x.txt"), 1), "__MACOSX/d2/._x.txt")
 	eq("none for unrelated", #T.companions(idx, "nothing"), 0)
+end
+
+-- parse_listing: encryption flags ------------------------------------------------------
+
+do
+	local idx = T.parse_listing(listing {
+		{ Path = "a.txt", Folder = "-", Size = "1", Encrypted = "+", Method = "AES-256 Deflate" },
+		{ Path = "b.txt", Folder = "-", Size = "1", Encrypted = "-", Method = "Deflate" },
+	})
+	check("zip encrypted", idx.encrypted)
+	check("zip aes", idx.aes)
+	check("zip names not locked", not idx.locked)
+	check("entry encrypted", idx.entries["a.txt"].encrypted)
+	check("entry plain", not idx.entries["b.txt"].encrypted)
+
+	idx = T.parse_listing(listing {
+		{ Path = "a.txt", Folder = "-", Size = "1", Encrypted = "+", Method = "ZipCrypto Store" },
+	})
+	check("zipcrypto is not aes", idx.encrypted and not idx.aes)
+
+	idx = T.parse_listing(listing {
+		{ ZipfsLocked = "+" },
+		{ Path = "a.txt", Size = "1", Attributes = "A -rw-r--r--", Encrypted = "+", Method = "LZMA2:12 7zAES:19" },
+	})
+	check("7z names locked", idx.locked)
+	eq("locked marker adds no entry", sorted(idx.children[""]), "a.txt")
+
+	idx = T.parse_listing(listing { { Path = "a.txt", Folder = "-", Size = "1" } })
+	check("plain zip", not idx.encrypted and not idx.locked)
 end
 
 print(string.format("%d passed, %d failed", passed, failed))

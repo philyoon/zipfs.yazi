@@ -109,6 +109,12 @@ echo "deep" >"$WORK/in/folder/sub/n.txt"
 	head -c 4000 /dev/zero | tr '\0' 'a' >"$WORK/mac/big.txt"
 	7zz a -tzip -mx0 "$WORK/bad.zip" big.txt >/dev/null
 	printf 'b' | dd of="$WORK/bad.zip" bs=1 seek=2000 conv=notrunc 2>/dev/null
+	# Encrypted: an AES zip, and a 7z whose names are encrypted too.
+	mkdir -p "$WORK/enc/d" && cd "$WORK/enc" || exit 1
+	echo "top secret" >note.txt
+	echo "deep secret" >d/x.txt
+	7zz a -tzip -mem=AES256 -psekrit "$WORK/secret.zip" . >/dev/null
+	7zz a -t7z -mhe=on -psekrit "$WORK/locked.7z" . >/dev/null
 ) || {
 	echo "Could not build test archives"
 	exit 1
@@ -137,6 +143,16 @@ mount() {
 has() { 7zz l -ba -slt "$1" 2>/dev/null | grep -qxF "Path = $2"; }
 cat_in() { 7zz e -so "$1" "$2" 2>/dev/null; }
 sum() { cksum <"$1"; }
+# field ARCHIVE PATH NAME: a field of one entry in `7zz l -slt`, opened with the test password.
+field() {
+	echo sekrit | 7zz l -slt -ba "$1" 2>/dev/null |
+		awk -v p="Path = $2" -v k="$3 = " '$0 == p { f = 1; next } /^Path = / { f = 0 } f && index($0, k) == 1 { print substr($0, length(k) + 1) }'
+}
+# Answer zipfs's password prompt.
+password() {
+	wait_until on_screen "Password for $1" || return 1
+	keys "$2" Enter
+}
 
 # wait_until CMD...: retry for up to $TIMEOUT seconds.
 wait_until() {
@@ -434,13 +450,88 @@ test_damaged() {
 	expect "reports damage" wait_until on_screen "bad.zip is damaged"
 }
 
+# --- tests: encrypted ----------------------------------------------------------------------
+
+enc_zip_enter() {
+	emit cd "$WORK"
+	emit reveal "$WORK/secret.zip"
+	wait_until on_screen "secret.zip"
+	emit plugin zipfs
+	expect "asks for the password" password secret.zip wrong
+	expect "says it was wrong" wait_until on_screen "Wrong password"
+	keys "sekrit" Enter
+	expect "entered" wait_until on_screen "archive://zip/"
+	emit reveal "$(mount "$WORK/secret.zip" note.txt)"
+	expect "preview of an encrypted file" wait_until on_screen "top secret"
+}
+
+enc_zip_paste() {
+	emit reveal "$WORK/in/new.txt"
+	emit yank
+	emit cd "$(mount "$WORK/secret.zip")"
+	emit paste
+	expect "new.txt in the zip" wait_until has "$WORK/secret.zip" new.txt
+	expect "new.txt encrypted" test "$(field "$WORK/secret.zip" new.txt Encrypted)" = "+"
+	expect "with AES like the rest" wait_until eval '[[ "$(field "$WORK/secret.zip" new.txt Method)" == AES* ]]'
+}
+
+enc_zip_save_back() {
+	emit cd "$(mount "$WORK/secret.zip")"
+	emit reveal "$(mount "$WORK/secret.zip" note.txt)"
+	wait_until on_screen "top secret"
+	emit open
+	saved() { echo sekrit | 7zz e -so "$WORK/secret.zip" note.txt 2>/dev/null | grep -q EDITED-BY-TEST; }
+	expect "edit saved into the zip" wait_until saved
+	expect "still encrypted" test "$(field "$WORK/secret.zip" note.txt Encrypted)" = "+"
+}
+
+enc_7z_enter() {
+	emit cd "$WORK"
+	emit reveal "$WORK/locked.7z"
+	wait_until on_screen "locked.7z"
+	emit plugin zipfs
+	expect "asks for the password" password locked.7z sekrit
+	expect "names listed" wait_until on_screen "note.txt"
+	emit cd "$(mount "$WORK/locked.7z" d)"
+	emit reveal "$(mount "$WORK/locked.7z" d/x.txt)"
+	expect "preview inside" wait_until on_screen "deep secret"
+}
+
+enc_7z_edit() {
+	emit reveal "$WORK/in/new.txt"
+	emit yank
+	emit cd "$(mount "$WORK/locked.7z")"
+	emit paste
+	added() { test "$(field "$WORK/locked.7z" new.txt Encrypted)" = "+"; }
+	expect "new.txt added, encrypted" wait_until added
+	opens_without_password() { 7zz l -ba "$1" </dev/null >/dev/null 2>&1; }
+	expect "names still need the password" not opens_without_password "$WORK/locked.7z"
+	emit reveal "$(mount "$WORK/locked.7z" note.txt)"
+	wait_until on_screen "note.txt"
+	emit remove --permanently --force
+	gone() { test -z "$(field "$WORK/locked.7z" note.txt Size)" && test -n "$(field "$WORK/locked.7z" new.txt Size)"; }
+	expect "note.txt deleted" wait_until gone
+}
+
+enc_clean_forgets() {
+	emit cd "$WORK"
+	emit plugin zipfs clean
+	sleep 1
+	emit reveal "$WORK/secret.zip"
+	wait_until on_screen "secret.zip"
+	emit plugin zipfs
+	expect "asks again after a clean" password secret.zip sekrit
+	expect "entered" wait_until on_screen "archive://zip/"
+}
+
 # --- run ------------------------------------------------------------------------------
 
 start_yazi
 for t in zip_browse zip_preview zip_copy_out zip_paste_in zip_paste_folder zip_overwrite \
 	zip_move_in zip_rename zip_create zip_delete zip_trash zip_save_back zip_clean_saves_edits \
 	sevenz_browse sevenz_edit tar_browse targz_browse tarzst_browse targz_read_only \
-	epub_browse macos_hidden macos_rename macos_delete test_ok test_inside test_damaged; do
+	epub_browse macos_hidden macos_rename macos_delete test_ok test_inside test_damaged \
+	enc_zip_enter enc_zip_paste enc_zip_save_back enc_7z_enter enc_7z_edit enc_clean_forgets; do
 	run "$t"
 done
 

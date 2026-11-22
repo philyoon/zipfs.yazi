@@ -79,15 +79,57 @@ end
 
 local function err(kind, fmt, ...) return Error.fs { kind = kind, message = string.format(fmt, ...) } end
 
-local function run(args)
-	local out, e = Command("7zz"):arg(args):stdin(Command.NULL):stdout(Command.PIPED):stderr(Command.PIPED):output()
+-- Passwords live in the plugin's state in Yazi's main Lua state, which outlives the fresh
+-- state each VFS call gets. They are never written to disk and go when Yazi quits.
+local get_password = ya.sync(function(st, archive) return st.passwords and st.passwords[archive] end)
+local set_password = ya.sync(function(st, archive, pw)
+	st.passwords = st.passwords or {}
+	st.passwords[archive] = pw
+end)
+local forget_passwords = ya.sync(function(st, keep)
+	local pw = keep and st.passwords and st.passwords[keep]
+	st.passwords = {}
+	if pw then
+		st.passwords[keep] = pw
+	end
+end)
+
+-- Run 7zz; for an archive with a known password, the password goes in on stdin, never on
+-- the command line where `ps` would show it. 7zz asks at most twice (to open a 7z with
+-- encrypted names, then for what it adds), so it gets three copies.
+local function exec(args, archive, cwd)
+	local pw = archive and get_password(archive)
+	local cmd = Command("7zz"):arg(args):stdout(Command.PIPED):stderr(Command.PIPED)
+	if cwd then
+		cmd:cwd(cwd)
+	end
+	local out, e
+	if pw then
+		local child
+		child, e = cmd:stdin(Command.PIPED):spawn()
+		if child then
+			child:write_all(string.rep(pw .. "\n", 3))
+			child:flush()
+			out, e = child:wait_with_output()
+		end
+	else
+		out, e = cmd:stdin(Command.NULL):output()
+	end
 	if not out then
 		return nil, err("NotFound", "zipfs needs `7zz` in PATH: %s", e)
-	elseif not out.status.success then
-		return nil, err("InvalidData", "7zz failed: %s", out.stderr)
+	elseif out.status.success then
+		return out.stdout
 	end
-	return out.stdout
+	local text = out.stdout .. out.stderr
+	if text:find("Wrong password") then
+		return nil, err("PermissionDenied", "Wrong password for %s", archive or "the archive")
+	elseif not pw and text:find("Enter password") then
+		return nil, err("PermissionDenied", "%s is encrypted: press l on it to enter the password", archive or "The archive")
+	end
+	return nil, err("InvalidData", "7zz failed: %s", out.stderr)
 end
+
+local function run(args, archive) return exec(args, archive) end
 
 local function read_file(path)
 	local f = io.open(path, "rb")
@@ -204,7 +246,7 @@ end
 -- hidden = { [path] = raw path } }
 local function parse_listing(text)
 	local entries, children = { [""] = { dir = true, len = 0, mode = DIR_MODE } }, { [""] = {} }
-	local hidden = {}
+	local hidden, encrypted, aes, locked = {}, false, false, false
 
 	local function add_child(path)
 		local parent, name = path:match("^(.*)/([^/]+)$")
@@ -236,6 +278,10 @@ local function parse_listing(text)
 
 		-- tar paths often start with "./"; 7zz only matches them spelled that way, so the raw
 		-- path is kept for extraction.
+		locked = locked or kv.ZipfsLocked == "+"
+		encrypted = encrypted or kv.Encrypted == "+"
+		aes = aes or (kv.Method or ""):find("AES") ~= nil
+
 		local path = kv.Path
 		while path and (path:find("^/") or path:find("^%./")) do
 			path = path:gsub("^/+", ""):gsub("^%./+", "")
@@ -260,6 +306,7 @@ local function parse_listing(text)
 			end
 			entries[path] = {
 				raw = kv.Path,
+				encrypted = kv.Encrypted == "+",
 				dir = is_dir,
 				len = is_dir and 0 or tonumber(kv.Size) or 0,
 				mtime = parse_time(kv.Modified),
@@ -267,7 +314,7 @@ local function parse_listing(text)
 			}
 		end
 	end
-	return { entries = entries, children = children, hidden = hidden }
+	return { entries = entries, children = children, hidden = hidden, encrypted = encrypted, aes = aes, locked = locked }
 end
 
 local function split(path)
@@ -392,6 +439,11 @@ local function index(archive)
 			return nil, e
 		end
 		text, e = run { "l", "-slt", "-ba", "-sccUTF-8", src }
+		if not text and get_password(archive) then
+			-- Names are encrypted too (7z -mhe). Remember that, so edits keep them encrypted.
+			text, e = run({ "l", "-slt", "-ba", "-sccUTF-8", src }, archive)
+			text = text and "ZipfsLocked = +\n\n" .. text
+		end
 		if not text then
 			return nil, e
 		end
@@ -483,7 +535,7 @@ local function extract_many(archive, idx, inners)
 	for _, inner in ipairs(todo) do
 		args[#args + 1] = idx.entries[inner].raw or inner
 	end
-	local _, e = run(args)
+	local _, e = run(args, archive)
 	if not e then
 		for _, inner in ipairs(todo) do
 			local to = Url(idx.tree .. "/" .. inner)
@@ -530,15 +582,9 @@ local function mutate(archive, check)
 			return false, e
 		end
 
-		local cmd = Command("7zz"):arg(args):stdin(Command.NULL):stdout(Command.PIPED):stderr(Command.PIPED)
-		if cwd then
-			cmd:cwd(cwd)
-		end
-		local out, e = cmd:output()
-		if not out then
-			return false, err("NotFound", "zipfs needs `7zz` in PATH: %s", e)
-		elseif not out.status.success then
-			return false, err("Other", "7zz failed: %s", out.stderr)
+		local _, e = exec(args, archive, cwd)
+		if e then
+			return false, e
 		end
 		remove_cache(idx.dir) -- the archive changed, so this version's listing is dead
 		return true
@@ -660,23 +706,41 @@ end
 
 local function write_meta(meta, expected, received) return write_atomic(meta, string.format("%d %d", expected, received)) end
 
-local function seven(args, cwd)
-	local cmd = Command("7zz"):arg(args):stdin(Command.NULL):stdout(Command.PIPED):stderr(Command.PIPED)
-	if cwd then
-		cmd:cwd(cwd)
+-- `7zz a` args that keep an encrypted archive encrypted the same way: new entries get the
+-- password, AES zips stay AES (7zz's zip default is ZipCrypto), and a 7z with encrypted
+-- names keeps them encrypted.
+local function add_args(archive, idx)
+	local kind = format_of(archive).type
+	local args = { "a", "-t" .. kind, "-spd", "-sccUTF-8" }
+	if idx.encrypted or idx.locked then
+		if not get_password(archive) then
+			return nil, err("PermissionDenied", "%s is encrypted: press l on it to enter the password first", archive)
+		end
+		args[#args + 1] = "-p"
+		if kind == "zip" and idx.aes then
+			args[#args + 1] = "-mem=AES256"
+		elseif kind == "7z" and idx.locked then
+			args[#args + 1] = "-mhe=on"
+		end
 	end
-	local out, e = cmd:output()
-	if not out then
-		return false, err("NotFound", "zipfs needs `7zz` in PATH: %s", e)
-	elseif not out.status.success then
-		return false, err("Other", "7zz failed: %s", out.stderr)
-	end
-	return true
+	args[#args + 1] = archive
+	args[#args + 1] = "--"
+	return args
+end
+
+local function seven(args, cwd, archive)
+	local _, e = exec(args, archive, cwd)
+	return e == nil, e
 end
 
 -- Add (or replace) <tree>/<inner> as <inner> in the zip. Caller holds the lock.
 local function add_from(archive, idx, inner, tree)
-	local ok, e = seven({ "a", "-t" .. format_of(archive).type, "-spd", "-sccUTF-8", archive, "--", inner }, tree)
+	local args, e = add_args(archive, idx)
+	if not args then
+		return false, e
+	end
+	args[#args + 1] = inner
+	local ok, e = seven(args, tree, archive)
 	if ok then
 		remove_cache(idx.dir)
 	end
@@ -712,11 +776,14 @@ local function write_back(archive, inners)
 		if #todo == 0 then
 			return todo
 		end
-		local args = { "a", "-t" .. format_of(archive).type, "-spd", "-sccUTF-8", archive, "--" }
+		local args, e = add_args(archive, idx)
+		if not args then
+			return nil, e
+		end
 		for _, inner in ipairs(todo) do
 			args[#args + 1] = inner
 		end
-		local ok, e = seven(args, idx.tree)
+		local ok, e = seven(args, idx.tree, archive)
 		if not ok then
 			return nil, e
 		end
@@ -896,7 +963,7 @@ local function trash(url)
 			return nil, err("NotFound", "No such entry: %s", inner)
 		end
 
-		local _, e = run { "x", "-y", "-spd", "-sccUTF-8", "-o" .. stage, archive, "--", inner }
+		local _, e = run({ "x", "-y", "-spd", "-sccUTF-8", "-o" .. stage, archive, "--", inner }, archive)
 		if e then
 			return nil, e
 		end
@@ -1215,6 +1282,7 @@ local function clean()
 	-- point at deleted copies. Keep that one.
 	local here = current_archive()
 	local keep = here and archive_prefix(here)
+	forget_passwords(here) -- along with the decrypted copies
 	local out = Command("du"):arg({ "-sk", root }):stdout(Command.PIPED):stderr(Command.NULL):output()
 	local kib = out and tonumber(out.stdout:match("^(%d+)")) or 0
 
@@ -1278,27 +1346,83 @@ local function test()
 	end
 	local name = archive:match("[^/]+$")
 	ya.notify { title = "zipfs", content = "Testing " .. name .. "...", timeout = 2 }
-	local out, e = Command("7zz")
-		:arg({ "t", "-bd", "-sccUTF-8", archive })
-		:stdin(Command.NULL)
-		:stdout(Command.PIPED)
-		:stderr(Command.PIPED)
-		:output()
-	if not out then
-		return ya.notify { title = "zipfs", content = "zipfs needs `7zz` in PATH: " .. tostring(e), level = "error", timeout = 5 }
-	elseif out.status.success then
+	local _, e = exec({ "t", "-bd", "-sccUTF-8", archive }, archive)
+	if not e then
 		return ya.notify { title = "zipfs", content = name .. ": no errors", timeout = 4 }
 	end
-	local lines = {}
-	for line in (out.stderr .. "\n" .. out.stdout):gmatch("[^\n]+") do
-		if #lines < 5 and (line:find("ERROR") or line:find("[Ee]rror")) then
+	local msg, lines = tostring(e), {}
+	if not msg:find("^7zz failed") then
+		return ya.notify { title = "zipfs", content = msg, level = "error", timeout = 5 }
+	end
+	for line in msg:gmatch("[^\n]+") do
+		if #lines < 5 and line:find("[Ee][Rr][Rr][Oo][Rr]") and not line:find("^7zz failed") then
 			lines[#lines + 1] = line
 		end
 	end
 	if #lines == 0 then
-		lines[1] = "7zz exited with code " .. tostring(out.status.code)
+		lines[1] = msg
 	end
 	ya.notify { title = "zipfs: " .. name .. " is damaged", content = table.concat(lines, "\n"), level = "error", timeout = 10 }
+end
+
+local function password_error(e) return e and (tostring(e):find("encrypted") or tostring(e):find("Wrong password")) end
+
+-- Does `archive` need a password zipfs doesn't have yet? Returns true, or false plus the
+-- listing (nil when even the names are encrypted and no password is known).
+local function needs_password(archive)
+	local idx, e = index(archive)
+	if not idx then
+		return password_error(e) ~= nil, nil
+	end
+	return idx.encrypted and not get_password(archive), idx
+end
+
+-- A password is right if the listing opens with it and the smallest encrypted file passes
+-- `7zz t`.
+local function check_password(archive)
+	local idx, e = index(archive)
+	if not idx then
+		return false, e
+	end
+	local pick
+	for _, info in pairs(idx.entries) do
+		if info.encrypted and not info.dir and (not pick or info.len < pick.len) then
+			pick = info
+		end
+	end
+	if not pick then
+		return true
+	end
+	local _, e = run({ "t", "-sccUTF-8", archive, "--", pick.raw }, archive)
+	return e == nil, e
+end
+
+-- Ask for `archive`'s password (three tries) and keep it in memory. Returns true when a
+-- correct one was entered.
+local function ask_password(archive)
+	local name = archive:match("[^/]+$")
+	for try = 1, 3 do
+		local pw, event = ya.input {
+			title = (try > 1 and "Wrong password. " or "") .. "Password for " .. name .. ":",
+			obscure = true,
+			pos = { "top-center", y = 3, w = 60 },
+		}
+		if event ~= 1 then
+			return false
+		end
+		set_password(archive, pw)
+		local ok, e = check_password(archive)
+		if ok then
+			return true
+		end
+		set_password(archive, nil)
+		if not password_error(e) then
+			ya.notify { title = "zipfs", content = tostring(e), level = "error", timeout = 5 }
+			return false
+		end
+	end
+	ya.notify { title = "zipfs", content = "Wrong password for " .. name, level = "error", timeout = 5 }
+	return false
 end
 
 -- `plugin zipfs clean` empties the cache. `plugin zipfs test` checks an archive. Otherwise, like smart-enter: zip -> browse
@@ -1314,8 +1438,12 @@ function M:entry(job)
 
 	if h and h.is_regular and format_of(h.url) then
 		touch(h.url)
+		local need, idx = needs_password(h.url)
+		if need and not ask_password(h.url) and not idx then
+			return -- even the names are encrypted: nothing to show without the password
+		end
 		-- Edits left from an earlier visit, in folders Yazi won't look at by itself.
-		local idx = index(h.url)
+		idx = index(h.url)
 		if idx then
 			settle(h.url, idx, nil)
 		end
@@ -1324,7 +1452,16 @@ function M:entry(job)
 		return
 	elseif h and h.in_zip and not h.is_dir then
 		-- Files over AUTO_EXTRACT_MAX were skipped by the fetcher; extract before opening.
-		local _, e = extract(Url(h.url))
+		local url = Url(h.url)
+		local _, e = extract(url)
+		if password_error(e) then
+			local archive = locate(url)
+			if archive and ask_password(archive) then
+				_, e = extract(url)
+			else
+				return
+			end
+		end
 		if e then
 			return ya.notify { title = "zipfs", content = tostring(e), level = "error", timeout = 5 }
 		end
