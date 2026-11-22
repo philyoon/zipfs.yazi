@@ -1,14 +1,22 @@
--- Unit tests for the pure parts of main.lua (listing parser, format table).
+-- Unit tests for the pure parts of core.lua (listing parser, format table).
 -- Run from anywhere: lua tests/unit.lua   (Lua 5.4+, no other dependencies)
 --
--- main.lua expects Yazi's globals. Only `ya.sync` runs at load time, so that is all the
+-- The plugin expects Yazi's globals. Only `ya.sync` runs at load time, so that is all the
 -- stub needs; everything else is touched only inside functions these tests don't call.
+-- Yazi resolves `require(".name")` to name.lua beside the plugin; so does this shim.
 
 ya = { sync = function(f) return f end }
 
 local here = arg[0]:match("^(.*)/[^/]+$") or "."
-local M = dofile(here .. "/../main.lua")
-local T = M._test
+local plain_require, loaded = require, {}
+function require(name)
+	if name:sub(1, 1) ~= "." then
+		return plain_require(name)
+	end
+	loaded[name] = loaded[name] or dofile(here .. "/../" .. name:sub(2) .. ".lua")
+	return loaded[name]
+end
+local T = require(".core")
 
 local failed, passed = 0, 0
 
@@ -92,7 +100,11 @@ check("tar.gz is read-only", not T.writable("/x/a.tar.gz"))
 
 -- parse_time / parse_mode ---------------------------------------------------------------
 
-eq("parse_time plain", T.parse_time("2026-01-02 03:04:05"), os.time { year = 2026, month = 1, day = 2, hour = 3, min = 4, sec = 5 })
+eq(
+	"parse_time plain",
+	T.parse_time("2026-01-02 03:04:05"),
+	os.time { year = 2026, month = 1, day = 2, hour = 3, min = 4, sec = 5 }
+)
 eq("parse_time 7z fractions", T.parse_time("2026-01-02 03:04:05.1234567"), T.parse_time("2026-01-02 03:04:05"))
 eq("parse_time empty", T.parse_time(""), nil)
 

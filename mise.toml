@@ -1,3 +1,5 @@
-# Dev tools for the tests. Yazi embeds Lua 5.4, so the unit tests run on the same version.
+# Dev tools. Yazi embeds Lua 5.4, so the unit tests run on the same version; StyLua
+# formats the code with Yazi's own settings (stylua.toml).
 [tools]
 lua = "5.4"
+stylua = "2.6.0"

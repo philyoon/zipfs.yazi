@@ -5,7 +5,7 @@
 A lightweight, 7zz-based archive filesystem for Yazi: enter zip, 7z, rar and tar files as
 folders, and edit zip and 7z in place.
 
-One Lua file and `7zz`, nothing else to build or install. It uses Yazi's custom VFS
+Plain Lua and `7zz`, nothing else to build or install. It uses Yazi's custom VFS
 (`kind = "mount"`), so inside an archive Yazi's normal keys just work: preview, open, copy,
 paste, rename, delete.
 
@@ -169,6 +169,11 @@ desc = "Quit without writing cwd-file"
 
 ## How it works
 
+- The code is split by who needs it: `main.lua` answers Yazi's VFS calls and the fetcher
+  with `core.lua` (formats, 7zz, cache, listings, extraction) and `edit.lua` (changes);
+  `cmds.lua` holds what only `plugin zipfs` runs (entering, passwords, locking, cleanup),
+  so VFS calls don't load it. `state.lua` holds every `ya.sync`, since each file gets its
+  own plugin state.
 - URLs look like `archive://zip//abs/path/to/file.7z/inner/path` (the mount is called
   `zip` whatever the format).
 - Listing comes from `7zz l -slt` and is cached in `$TMPDIR/yazi-zipfs/<a>-<v>.list`, where
@@ -208,8 +213,9 @@ desc = "Quit without writing cwd-file"
 ## Development
 
 ```sh
-mise install         # Lua 5.4 (what Yazi embeds), pinned in mise.toml
+mise install         # Lua 5.4 (what Yazi embeds) and StyLua, pinned in mise.toml
 lua tests/unit.lua   # listing parser and format table
+stylua .             # format with Yazi's own settings (stylua.toml)
 tests/e2e.sh         # a real Yazi in tmux, driven with `ya emit-to`
 ```
 
@@ -223,7 +229,7 @@ commands. `tests/e2e.sh zip_` runs only the tests whose names start with `zip_`;
 [zippity](https://github.com/hawkff/zippity) covers far more (dmg and disk images, nested
 archives, split volumes, creating and re-encrypting archives) with a Rust helper and
 explicit edit sessions.
-zipfs stays small: one Lua file, Yazi's own keys, and edits that apply at once.
+zipfs stays small: plain Lua, Yazi's own keys, and edits that apply at once.
 
 ## License
 

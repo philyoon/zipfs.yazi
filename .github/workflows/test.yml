@@ -15,6 +15,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y lua5.4
       - name: Unit tests
         run: lua5.4 tests/unit.lua
+      - name: Formatting
+        run: |
+          curl -fsSL -o stylua.zip https://github.com/JohnnyMorganz/StyLua/releases/download/v2.6.0/stylua-linux-x86_64.zip
+          unzip -q stylua.zip && ./stylua --check *.lua tests/unit.lua
 
   # A real Yazi in tmux, driven with `ya emit-to`. Versions are pinned: Yazi's custom VFS
   # API is experimental, so a new Yazi release is something to test on purpose.
