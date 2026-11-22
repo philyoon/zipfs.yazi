@@ -75,7 +75,7 @@ cached copy only.
 
 Pressing `l` on an encrypted archive asks for its password, and so does opening an
 encrypted file inside when zipfs doesn't have it yet. A wrong password gets two more
-tries. Then everything works as usual, edits included: added and saved files are
+tries; cancelling, or three wrong ones, leaves you outside. Then everything works as usual, edits included: added and saved files are
 encrypted with the same password, AES zips stay AES, and a 7z with encrypted names keeps
 them encrypted.
 

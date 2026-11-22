@@ -287,7 +287,8 @@ local function check_password(archive)
 end
 
 -- Ask for `archive`'s password (three tries) and keep it in memory. Returns true when a
--- correct one was entered.
+-- correct one was entered, else false and whether the prompt was cancelled (other failures
+-- have already been reported).
 local function ask_password(archive)
   local name = archive:match("[^/]+$")
   for try = 1, 3 do
@@ -297,7 +298,7 @@ local function ask_password(archive)
       pos = { "top-center", y = 3, w = 60 },
     }
     if event ~= 1 then
-      return false
+      return false, true
     end
     set_password(archive, pw)
     local ok, e = check_password(archive)
@@ -333,12 +334,13 @@ local function entry(job)
   if h and h.is_regular and format_of(h.url) then
     touch(h.url)
     sweep_orphans()
-    local need, idx = needs_password(h.url)
-    if need and not ask_password(h.url) and not idx then
-      return -- even the names are encrypted: nothing to show without the password
+    -- Without the right password, stay outside: a zip's names are readable, but showing
+    -- them would look like the password was accepted while no file opens.
+    if needs_password(h.url) and not ask_password(h.url) then
+      return
     end
     -- Edits left from an earlier visit, in folders Yazi won't look at by itself.
-    idx = index(h.url)
+    local idx = index(h.url)
     if idx then
       settle(h.url, idx, nil)
     end
@@ -351,11 +353,22 @@ local function entry(job)
     local _, e = extract(url)
     if password_error(e) then
       local archive = locate(url)
-      if archive and ask_password(archive) then
-        _, e = extract(url)
-      else
+      local ok, cancelled = false, false
+      if archive then
+        ok, cancelled = ask_password(archive)
+      end
+      if not ok then
+        if cancelled then
+          ya.notify {
+            title = "zipfs",
+            content = "Not opened: " .. h.url:match("[^/]+$") .. " is encrypted and needs the password",
+            level = "warn",
+            timeout = 5,
+          }
+        end
         return
       end
+      _, e = extract(url)
     end
     if e then
       return ya.notify { title = "zipfs", content = tostring(e), level = "error", timeout = 5 }

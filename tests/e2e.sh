@@ -115,6 +115,10 @@ echo "deep" >"$WORK/in/folder/sub/n.txt"
 	echo "deep secret" >d/x.txt
 	7zz a -tzip -mem=AES256 -psekrit "$WORK/secret.zip" . >/dev/null
 	7zz a -t7z -mhe=on -psekrit "$WORK/locked.7z" . >/dev/null
+	# ZipCrypto, what `zip -e` and Finder-era tools make.
+	mkdir -p "$WORK/zc" && cd "$WORK/zc" || exit 1
+	printf '# Plan\n\nzipcrypto secret\n' >PLAN.md
+	7zz a -tzip -mem=ZipCrypto -psekrit "$WORK/zc.zip" . >/dev/null
 ) || {
 	echo "Could not build test archives"
 	exit 1
@@ -152,6 +156,14 @@ field() {
 password() {
 	wait_until on_screen "Password for $1" || return 1
 	keys "$2" Enter
+}
+
+# Cancel an input box: the first Escape only leaves insert mode, and two sent at once
+# arrive as Alt+Escape.
+cancel() {
+	keys Escape
+	sleep 0.3
+	keys Escape
 }
 
 # wait_until CMD...: retry for up to $TIMEOUT seconds.
@@ -474,6 +486,12 @@ enc_zip_enter() {
 	emit plugin zipfs
 	expect "asks for the password" password secret.zip wrong
 	expect "says it was wrong" wait_until on_screen "Wrong password"
+	cancel
+	sleep 1
+	expect "cancelling stays outside" not on_screen "archive://zip/"
+	emit plugin zipfs
+	password secret.zip wrong
+	wait_until on_screen "Wrong password"
 	keys "sekrit" Enter
 	expect "entered" wait_until on_screen "archive://zip/"
 	emit reveal "$(mount "$WORK/secret.zip" note.txt)"
@@ -552,8 +570,39 @@ enc_clean_forgets() {
 	expect "entered" wait_until on_screen "archive://zip/"
 }
 
+# `l` on a file in a ZipCrypto zip opens it.
+enc_zipcrypto_open() {
+	expect "unlocked" unlock "$WORK/zc.zip"
+	emit reveal "$(mount "$WORK/zc.zip" PLAN.md)"
+	expect "preview" wait_until on_screen "zipcrypto secret"
+	emit plugin zipfs
+	saved() { echo sekrit | 7zz e -so "$WORK/zc.zip" PLAN.md 2>/dev/null | grep -q EDITED-BY-TEST; }
+	expect "opened and saved back" wait_until saved
+}
+
+# Opening an encrypted file without the password says why it didn't open.
+enc_open_cancel() {
+	emit cd "$WORK"
+	sleep 1 # let the lock from leaving finish
+	emit cd "$(mount "$WORK/zc.zip")"
+	emit reveal "$(mount "$WORK/zc.zip" PLAN.md)"
+	wait_until on_screen "PLAN.md"
+	emit plugin zipfs
+	expect "asks for the password" wait_until on_screen "Password for zc.zip"
+	cancel
+	expect "says it was not opened" wait_until on_screen "Not opened: PLAN.md"
+	emit plugin zipfs
+	for _ in 1 2 3; do
+		password zc.zip wrong
+		sleep 0.5
+	done
+	expect "says the password was wrong" wait_until on_screen "Wrong password for"
+	emit cd "$WORK"
+}
+
 # Quitting with `plugin zipfs quit` from inside locks the archive. Restarts Yazi.
 enc_quit_locks() {
+	expect "unlocked" unlock "$WORK/secret.zip"
 	emit reveal "$(mount "$WORK/secret.zip" note.txt)"
 	expect "preview" wait_until on_screen "top secret"
 	expect "copies while inside" wait_until cached "$WORK/secret.zip"
@@ -589,7 +638,7 @@ for t in zip_browse zip_preview zip_copy_out zip_paste_in zip_paste_folder zip_o
 	sevenz_browse sevenz_edit tar_browse targz_browse tarzst_browse targz_read_only \
 	epub_browse macos_hidden macos_rename macos_delete test_ok test_inside test_damaged \
 	enc_zip_enter enc_leave_locks enc_zip_paste enc_zip_save_back enc_7z_enter enc_7z_edit \
-	enc_clean_forgets enc_quit_locks enc_crash_sweep; do
+	enc_clean_forgets enc_zipcrypto_open enc_open_cancel enc_quit_locks enc_crash_sweep; do
 	run "$t"
 done
 
