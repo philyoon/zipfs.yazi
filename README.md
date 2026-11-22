@@ -215,7 +215,7 @@ desc = "Quit without writing cwd-file"
 ```sh
 mise install         # Lua 5.4 (what Yazi embeds) and StyLua, pinned in mise.toml
 lua tests/unit.lua   # listing parser and format table
-stylua .             # format with Yazi's own settings (stylua.toml)
+stylua .             # format (stylua.toml: Yazi's settings, 2-space indent)
 tests/e2e.sh         # a real Yazi in tmux, driven with `ya emit-to`
 ```
 
