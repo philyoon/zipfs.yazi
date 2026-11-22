@@ -327,6 +327,10 @@ local function entry(job)
     return lock(job.args[2])
   elseif job.args[1] == "quit" then
     return quit(job)
+  elseif job.args[1] == "compress" then
+    return require(".pack").compress(job)
+  elseif job.args[1] == "extract" then
+    return require(".pack").extract(job, { needs_password = needs_password, ask_password = ask_password, lock = lock })
   end
 
   local h = hovered()

@@ -1,4 +1,4 @@
--- Unit tests for the pure parts of core.lua (listing parser, format table).
+-- Unit tests for the pure parts of core.lua (listing parser, format table) and pack.lua.
 -- Run from anywhere: lua tests/unit.lua   (Lua 5.4+, no other dependencies)
 --
 -- The plugin expects Yazi's globals. Only `ya.sync` runs at load time, so that is all the
@@ -249,6 +249,36 @@ do
 
   idx = T.parse_listing(listing { { Path = "a.txt", Folder = "-", Size = "1" } })
   check("plain zip", not idx.encrypted and not idx.locked)
+end
+
+-- pack: names for compress and extract ---------------------------------------------------
+
+do
+  local P = require(".pack")
+  for name, want in pairs {
+    ["a.zip"] = "a",
+    ["A.ZIP"] = "A",
+    ["a.tar.gz"] = "a",
+    ["a.b.tgz"] = "a.b",
+    ["book.epub"] = "book",
+    ["notes.txt"] = "notes",
+    ["plain"] = "plain",
+    [".zip"] = ".zip",
+  } do
+    eq("stem " .. name, P.stem(name), want)
+  end
+  for name, want in pairs {
+    ["a.zip"] = "zip",
+    ["a.7z"] = "7z",
+    ["a.tar"] = "tar",
+    ["a.TAR.ZST"] = "tar",
+    ["a.tgz"] = "tar",
+    ["a.txz"] = "tar",
+    ["a.rar"] = nil, -- 7zz can't write rar
+    ["a.txt"] = nil,
+  } do
+    eq("kind_of " .. name, P.kind_of(name), want)
+  end
 end
 
 print(string.format("%d passed, %d failed", passed, failed))

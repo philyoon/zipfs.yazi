@@ -3,7 +3,7 @@
 [![test](https://github.com/philyoon/zipfs.yazi/actions/workflows/test.yml/badge.svg)](https://github.com/philyoon/zipfs.yazi/actions/workflows/test.yml)
 
 A lightweight, 7zz-based archive filesystem for Yazi: enter zip, 7z, rar and tar files as
-folders, and edit zip and 7z in place.
+folders, edit zip and 7z in place, and compress and extract (encrypted archives included).
 
 Plain Lua and `7zz`, nothing else to build or install. It uses Yazi's custom VFS
 (`kind = "mount"`), so inside an archive Yazi's normal keys just work: preview, open, copy,
@@ -96,6 +96,22 @@ them encrypted.
   can't be previewed until you enter it with `l` or open one of them.
 - One password per archive: files with different passwords in one zip are not supported.
 
+### Compress and extract
+
+- `plugin zipfs compress` packs the selected files (or the hovered one) into a new archive
+  beside them. It asks for the name, `.zip` by default; the extension picks the format: zip,
+  7z, tar, tar.gz, tar.bz2, tar.xz or tar.zst. `plugin zipfs -- compress 7z` starts with
+  `.7z` instead. Existing files are replaced only after you confirm.
+- `plugin zipfs -- compress --encrypt` asks for a password (twice) and encrypts the zip
+  (AES-256) or 7z (file names too).
+- `plugin zipfs extract` unpacks the selected archives (or the hovered one) beside them,
+  asking for the password when needed. An archive with a single top-level item yields just
+  that item; one with more gets a folder named after the archive. Names already taken get
+  " (1)", " (2)", ... Finder metadata (`__MACOSX/`, `._name`) is left out.
+
+zip and 7z are made with `7zz`, tars with the system `tar` (7zz can't write zstd). Both
+build into a temporary name first, so a failed run leaves nothing half-written.
+
 If a paste fails (for example the archive's folder is read-only), Yazi's task stays at
 "0% - 0B / 0B" instead of reporting an error. It does the same for a read-only plain folder.
 Nothing is lost: the source stays, and the archive is unchanged. Cancel the task from the
@@ -155,6 +171,11 @@ on   = ["g", "t"]
 run  = "plugin zipfs test"
 desc = "Check the archive for damage"
 
+[[mgr.prepend_keymap]]
+on   = "C"
+run  = "plugin zipfs compress"
+desc = "Compress into an archive"
+
 # Locks encrypted archives (deletes their decrypted copies) before quitting.
 [[mgr.prepend_keymap]]
 on   = "q"
@@ -167,12 +188,20 @@ run  = "plugin zipfs -- quit --no-cwd-file"
 desc = "Quit without writing cwd-file"
 ```
 
+To extract with `o` (the "Extract here" entry Yazi offers for archives), point Yazi's
+`extract` opener at zipfs in `~/.config/yazi/yazi.toml`:
+
+```toml
+[opener]
+extract = [{ run = "ya emit plugin zipfs extract", desc = "Extract here", for = "unix" }]
+```
+
 ## How it works
 
 - The code is split by who needs it: `main.lua` answers Yazi's VFS calls and the fetcher
   with `core.lua` (formats, 7zz, cache, listings, extraction) and `edit.lua` (changes);
   `cmds.lua` holds what only `plugin zipfs` runs (entering, passwords, locking, cleanup),
-  so VFS calls don't load it. `state.lua` holds every `ya.sync`, since each file gets its
+  so VFS calls don't load it; `pack.lua` holds compress and extract. `state.lua` holds every `ya.sync`, since each file gets its
   own plugin state.
 - URLs look like `archive://zip//abs/path/to/file.7z/inner/path` (the mount is called
   `zip` whatever the format).
@@ -214,7 +243,7 @@ desc = "Quit without writing cwd-file"
 
 ```sh
 mise install         # Lua 5.4 (what Yazi embeds) and StyLua, pinned in mise.toml
-lua tests/unit.lua   # listing parser and format table
+lua tests/unit.lua   # listing parser, format table, archive names
 stylua .             # format (stylua.toml: Yazi's settings, 2-space indent)
 tests/e2e.sh         # a real Yazi in tmux, driven with `ya emit-to`
 ```

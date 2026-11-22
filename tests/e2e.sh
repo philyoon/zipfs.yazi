@@ -54,9 +54,10 @@ group = "mime"
 
 [opener]
 edit = [{ run = '$WORK/bin/editor %s', block = true, desc = "test editor" }]
+extract = [{ run = "ya emit plugin zipfs extract", desc = "Extract here" }]
 
 [open]
-prepend_rules = [{ url = "*", use = "edit" }]
+prepend_rules = [{ url = "*.tar", use = "extract" }, { url = "*", use = "edit" }]
 EOF
 
 cat >"$WORK/bin/trash" <<EOF
@@ -105,6 +106,7 @@ echo "deep" >"$WORK/in/folder/sub/n.txt"
 	echo "meta" >__MACOSX/d2/._x.txt
 	echo "meta" >__MACOSX/._d2
 	7zz a -tzip "$WORK/mac.zip" . >/dev/null
+	cp "$WORK/mac.zip" "$WORK/finder.zip" # for extract, which the edit tests leave alone
 	# Stored (no compression), then one byte flipped inside the data: a CRC error.
 	head -c 4000 /dev/zero | tr '\0' 'a' >"$WORK/mac/big.txt"
 	7zz a -tzip -mx0 "$WORK/bad.zip" big.txt >/dev/null
@@ -156,6 +158,15 @@ field() {
 password() {
 	wait_until on_screen "Password for $1" || return 1
 	keys "$2" Enter
+}
+
+# A fresh Yazi, for tests that look for a message. Yazi shows three at a time and queues
+# the rest, and each new one restarts the countdown of those shown, so after a burst of
+# tests a new message can wait in the queue for a long time.
+restart_yazi() {
+	tmux -L "$SOCK" kill-server
+	sleep 0.5
+	start_yazi
 }
 
 # Cancel an input box: the first Escape only leaves insert mode, and two sent at once
@@ -585,7 +596,8 @@ enc_zipcrypto_open() {
 # Opening an encrypted file without the password says why it didn't open.
 enc_open_cancel() {
 	emit cd "$WORK"
-	sleep 1 # let the lock from leaving finish
+	expect "locked on leaving" wait_until not cached "$WORK/zc.zip"
+	restart_yazi
 	emit cd "$(mount "$WORK/zc.zip")"
 	emit reveal "$(mount "$WORK/zc.zip" PLAN.md)"
 	wait_until on_screen "PLAN.md"
@@ -632,15 +644,132 @@ enc_crash_sweep() {
 	expect "orphaned copies swept" wait_until not cached "$WORK/locked.7z"
 }
 
+# --- tests: compress and extract ---------------------------------------------------------
+
+pack_compress_zip() {
+	emit cd "$WORK/in"
+	emit reveal "$WORK/in/folder"
+	wait_until on_screen "folder"
+	emit plugin zipfs compress
+	expect "asks for the name" wait_until on_screen "Create archive:"
+	keys Enter
+	expect "folder.zip made" wait_until has "$WORK/in/folder.zip" folder/sub/n.txt
+	expect "no temp file left" not ls "$WORK"/in/.zipfs-* 2>/dev/null
+}
+
+pack_overwrite() {
+	emit reveal "$WORK/in/folder"
+	emit plugin zipfs compress
+	wait_until on_screen "Create archive:"
+	keys Enter
+	expect "asks before overwriting" wait_until on_screen "Overwrite folder.zip?"
+	local before
+	before=$(sum "$WORK/in/folder.zip")
+	echo "more" >"$WORK/in/folder/more.txt"
+	keys y Enter
+	expect "replaced, not added to" wait_until has "$WORK/in/folder.zip" folder/more.txt
+	rm "$WORK/in/folder/more.txt"
+	expect "one copy of each file" test "$(7zz l -ba "$WORK/in/folder.zip" | grep -c 'n.txt$')" = 1
+}
+
+pack_compress_tarzst() {
+	emit reveal "$WORK/in/folder"
+	emit plugin zipfs "compress tar.zst" # one string: ya passes it as the plugin args
+	wait_until on_screen "folder.tar.zst"
+	keys Enter
+	listed() { tar -tf "$WORK/in/folder.tar.zst" 2>/dev/null | grep -q "folder/sub/n.txt"; }
+	expect "folder.tar.zst made" wait_until listed
+	expect "no AppleDouble files" not eval 'tar -tf "$WORK/in/folder.tar.zst" | grep -q "/\._"'
+}
+
+pack_compress_encrypted() {
+	emit reveal "$WORK/in/new.txt"
+	emit plugin zipfs "compress 7z --encrypt"
+	wait_until on_screen "new.txt.7z"
+	keys Enter
+	expect "asks for a password" wait_until on_screen "Password for the new archive"
+	keys sekrit Enter
+	wait_until on_screen "Password again"
+	keys sekrit Enter
+	expect "new.txt.7z made, encrypted" wait_until eval '[ "$(field "$WORK/in/new.txt.7z" new.txt Encrypted)" = "+" ]'
+	opens_without_password() { 7zz l -ba "$1" </dev/null >/dev/null 2>&1; }
+	expect "names encrypted too" not opens_without_password "$WORK/in/new.txt.7z"
+}
+
+pack_extract_folder() {
+	emit cd "$WORK"
+	emit reveal "$WORK/work.zip"
+	wait_until on_screen "work.zip"
+	emit plugin zipfs extract
+	expect "several items: a folder named after it" wait_until test -f "$WORK/work/d/a.txt"
+	expect "with all of them" test "$(find "$WORK/work" -mindepth 1 -maxdepth 1 | wc -l)" -gt 1
+	expect "says so" wait_until on_screen "Extracted work.zip to work"
+	expect "no temp folder left" not ls -d "$WORK"/.zipfs-* 2>/dev/null
+}
+
+pack_extract_single() {
+	emit cd "$WORK/in"
+	emit reveal "$WORK/in/folder.zip"
+	wait_until on_screen "folder.zip"
+	emit plugin zipfs extract
+	expect "one item: just that, under a free name" wait_until test -f "$WORK/in/folder (1)/sub/n.txt"
+}
+
+pack_extract_macos() {
+	emit cd "$WORK"
+	emit reveal "$WORK/finder.zip"
+	wait_until on_screen "finder.zip"
+	emit plugin zipfs extract
+	expect "extracted" wait_until test -f "$WORK/finder/d2/x.txt"
+	expect "no __MACOSX" not test -e "$WORK/finder/__MACOSX"
+	expect "no ._ files" test -z "$(find "$WORK/finder" -name '._*')"
+}
+
+pack_extract_tarzst() {
+	emit reveal "$WORK/work.tar.zst"
+	wait_until on_screen "work.tar.zst"
+	emit plugin zipfs extract
+	expect "compressed tar extracted" wait_until test -f "$WORK/work (1)/d/a.txt"
+}
+
+# The README's opener: `o` on an archive runs `ya emit plugin zipfs extract`.
+pack_extract_opener() {
+	emit cd "$WORK"
+	emit reveal "$WORK/work.tar"
+	wait_until on_screen "work.tar"
+	emit open
+	expect "extracted through the opener" wait_until test -f "$WORK/work (2)/d/a.txt"
+}
+
+pack_extract_encrypted() {
+	restart_yazi
+	emit cd "$WORK"
+	emit reveal "$WORK/secret.zip"
+	wait_until on_screen "secret.zip"
+	emit plugin zipfs extract
+	expect "asks for the password" wait_until on_screen "Password for secret.zip"
+	cancel
+	expect "says it was not extracted" wait_until on_screen "Not extracted: secret.zip"
+	emit plugin zipfs extract
+	password secret.zip sekrit
+	expect "extracted" wait_until test -f "$WORK/secret/note.txt"
+	expect "decrypted" grep -q "top secret" "$WORK/secret/note.txt"
+	expect "locked again" wait_until not cached "$WORK/secret.zip"
+	rm -rf "$WORK/secret"
+}
+
 # --- run ------------------------------------------------------------------------------
 
 start_yazi
-for t in zip_browse zip_preview zip_copy_out zip_paste_in zip_paste_folder zip_overwrite \
+ALL="zip_browse zip_preview zip_copy_out zip_paste_in zip_paste_folder zip_overwrite \
 	zip_move_in zip_rename zip_create zip_delete zip_trash zip_save_back zip_clean_saves_edits \
 	sevenz_browse sevenz_edit tar_browse targz_browse tarzst_browse targz_read_only \
 	epub_browse macos_hidden macos_rename macos_delete test_ok test_inside test_damaged \
+	pack_compress_zip pack_overwrite pack_compress_tarzst pack_compress_encrypted pack_extract_folder \
+	pack_extract_single pack_extract_macos pack_extract_tarzst pack_extract_opener pack_extract_encrypted \
 	enc_zip_enter enc_leave_locks enc_zip_paste enc_zip_save_back enc_7z_enter enc_7z_edit \
-	enc_clean_forgets enc_zipcrypto_open enc_open_cancel enc_quit_locks enc_crash_sweep; do
+	enc_clean_forgets enc_zipcrypto_open enc_open_cancel enc_quit_locks enc_crash_sweep"
+for t in ${E2E_TESTS:-$ALL}; do
 	run "$t"
 done
 

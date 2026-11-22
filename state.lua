@@ -80,6 +80,22 @@ end)
 
 local cwd_url = ya.sync(function() return tostring(cx.active.current.cwd) end)
 
+-- What `compress` and `extract` act on: the selected files, or else the hovered one. Paths
+-- are nil for anything that isn't a plain local file (inside an archive, say).
+local targets = ya.sync(function()
+  local tab = cx.active
+  local function plain(url) return url.spec.is_regular and tostring(url) or nil end
+  local paths, n = {}, 0
+  for _, url in pairs(tab.selected) do
+    n = n + 1
+    paths[n] = plain(url) or false
+  end
+  if n == 0 and tab.current.hovered then
+    n, paths[1] = 1, plain(tab.current.hovered.url) or false
+  end
+  return { cwd = plain(tab.current.cwd), name = tab.current.cwd.name, paths = paths }
+end)
+
 return {
   SCHEME = SCHEME,
   DOMAIN = DOMAIN,
@@ -92,4 +108,5 @@ return {
   hovered = hovered,
   current_archive = current_archive,
   cwd_url = cwd_url,
+  targets = targets,
 }
