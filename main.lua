@@ -1,5 +1,5 @@
 --- Browse archives as folders through Yazi's custom VFS (kind = "mount"): zip and 7z
---- (read and write), rar and tar, plain or compressed (read-only).
+--- (read and write), rar, iso, cab and tar, plain or compressed (read-only).
 ---
 --- Listing, extraction and edits go through `7zz`, which keeps non-ASCII names intact
 --- (`zipinfo`/`unzip` on macOS turn them into "????").
@@ -33,9 +33,25 @@ local AUTO_EXTRACT_MAX = 64 * 1024 * 1024
 -- cache once and browsed instead.
 local FORMATS = {
 	{ "%.zip$", type = "zip" },
+	-- Zip under another name. Editing a signed one (apk, ipa, jar) breaks its signature.
 	{ "%.jar$", type = "zip" },
+	{ "%.war$", type = "zip" },
+	{ "%.ear$", type = "zip" },
+	{ "%.aar$", type = "zip" },
+	{ "%.apk$", type = "zip" },
+	{ "%.ipa$", type = "zip" },
+	{ "%.xpi$", type = "zip" },
+	{ "%.whl$", type = "zip" },
+	{ "%.nupkg$", type = "zip" },
+	{ "%.vsix$", type = "zip" },
+	{ "%.epub$", type = "zip" },
+	{ "%.cbz$", type = "zip" },
 	{ "%.7z$", type = "7z" },
+	{ "%.cb7$", type = "7z" },
 	{ "%.rar$" },
+	{ "%.cbr$" },
+	{ "%.iso$" },
+	{ "%.cab$" },
 	{ "%.tar$" },
 	{ "%.tar%.gz$", tar = true },
 	{ "%.tgz$", tar = true },
@@ -178,9 +194,17 @@ local function parse_mode(attrs, is_dir)
 	return (is_dir and tonumber("40000", 8) or tonumber("100000", 8)) | bits
 end
 
--- `7zz l -slt` -> { entries = { [path] = info }, children = { [dir] = { name, ... } } }
+-- macOS metadata that Finder's "Compress" adds: a `__MACOSX/` tree and `._name` files
+-- (AppleDouble: tags, icons, resource forks). Nobody wants to see them.
+local function is_hidden(path)
+	return path == "__MACOSX" or path:sub(1, 9) == "__MACOSX/" or (path:match("[^/]+$") or ""):sub(1, 2) == "._"
+end
+
+-- `7zz l -slt` -> { entries = { [path] = info }, children = { [dir] = { name, ... } },
+-- hidden = { [path] = raw path } }
 local function parse_listing(text)
 	local entries, children = { [""] = { dir = true, len = 0, mode = DIR_MODE } }, { [""] = {} }
+	local hidden = {}
 
 	local function add_child(path)
 		local parent, name = path:match("^(.*)/([^/]+)$")
@@ -222,7 +246,9 @@ local function parse_listing(text)
 		end
 		-- Skip "../" entries: they would let a hostile zip write outside the cache folder.
 		local unsafe = path and (path == ".." or path:find("^%.%./") or path:find("/%.%./") or path:find("/%.%.$"))
-		if path and path ~= "" and not unsafe then
+		if path and path ~= "" and not unsafe and is_hidden(path) then
+			hidden[path] = kv.Path
+		elseif path and path ~= "" and not unsafe then
 			-- 7z listings have no Folder field; the attributes start with "D" instead.
 			local is_dir = kv.Folder == "+" or (kv.Folder == nil and (kv.Attributes or ""):find("^D") ~= nil)
 			ensure_dir(path:match("^(.*)/[^/]+$") or "")
@@ -241,7 +267,51 @@ local function parse_listing(text)
 			}
 		end
 	end
-	return { entries = entries, children = children }
+	return { entries = entries, children = children, hidden = hidden }
+end
+
+local function split(path)
+	local parent, name = path:match("^(.*)/([^/]+)$")
+	return parent and parent .. "/" or "", name or path
+end
+
+-- The hidden metadata that belongs to `path`, so it goes along when `path` is deleted or
+-- renamed: `dir/._name`, `__MACOSX/dir/._name` and, for a folder, `__MACOSX/path/...`.
+-- Returns { { hidden path, path it moves to when `path` becomes `to` } }, leaving out
+-- entries under a folder that is already in the list (7zz takes folders whole).
+local function companions(idx, path, to)
+	local pp, pn = split(path)
+	local tp, tn = split(to or path)
+	local out = {}
+	for h, raw in pairs(idx.hidden) do
+		local moved
+		if h == pp .. "._" .. pn then
+			moved = tp .. "._" .. tn
+		elseif h == "__MACOSX/" .. pp .. "._" .. pn then
+			moved = "__MACOSX/" .. tp .. "._" .. tn
+		elseif h == "__MACOSX/" .. path or h:sub(1, #path + 10) == "__MACOSX/" .. path .. "/" then
+			moved = "__MACOSX/" .. (to or path) .. h:sub(#path + 10)
+		end
+		if moved then
+			out[#out + 1] = { h, moved, raw }
+		end
+	end
+	table.sort(out, function(a, b) return a[1] < b[1] end)
+	local kept, last = {}, nil
+	for _, c in ipairs(out) do
+		if not (last and c[1]:sub(1, #last + 1) == last .. "/") then
+			kept[#kept + 1], last = c, c[1]
+		end
+	end
+	return kept
+end
+
+-- `args` plus the hidden metadata of `inner`, for `7zz d`.
+local function with_companions(args, idx, inner)
+	for _, c in ipairs(companions(idx, inner)) do
+		args[#args + 1] = c[3]
+	end
+	return args
 end
 
 -- 7zz rewrites the archive on every edit. Deleting a folder makes Yazi send one RemoveFile per
@@ -502,7 +572,7 @@ local function remove(url, mode)
 		elseif mode == "dir" and #(idx.children[inner] or {}) > 0 then
 			return nil, err("DirectoryNotEmpty", "Directory not empty: %s", inner)
 		end
-		return { "d", "-spd", "-sccUTF-8", archive, "--", inner }
+		return with_companions({ "d", "-spd", "-sccUTF-8", archive, "--", inner }, idx, inner)
 	end)
 end
 
@@ -530,7 +600,11 @@ local function rename(from, to)
 			return nil, err("NotFound", "No such directory: %s", parent)
 		end
 		-- 7zz renames a folder together with everything under it.
-		return { "rn", "-spd", "-sccUTF-8", archive, "--", src, dst }
+		local args = { "rn", "-spd", "-sccUTF-8", archive, "--", src, dst }
+		for _, c in ipairs(companions(idx, src, dst)) do
+			args[#args + 1], args[#args + 2] = c[3], c[2]
+		end
+		return args
 	end)
 end
 
@@ -838,7 +912,7 @@ local function trash(url)
 		if not ok then
 			return nil, e
 		end
-		return { "d", "-spd", "-sccUTF-8", archive, "--", inner }
+		return with_companions({ "d", "-spd", "-sccUTF-8", archive, "--", inner }, idx, inner)
 	end)
 	fs.remove("dir_all", Url(stage))
 	return ok, e
@@ -1176,11 +1250,64 @@ local function clean()
 	ya.notify { title = "zipfs cache", content = msg, timeout = 4, level = unsaved > 0 and "warn" or "info" }
 end
 
--- `plugin zipfs clean` empties the cache. Otherwise, like smart-enter: zip -> browse
+local cwd = ya.sync(function() return tostring(cx.active.current.cwd) end)
+
+-- The archive `plugin zipfs test` checks: the hovered one, or the one you are inside.
+local function test_target()
+	local h = hovered()
+	if h and h.is_regular and format_of(h.url) then
+		return h.url
+	end
+	local path = cwd():match("^" .. SCHEME .. "://" .. DOMAIN .. "[:%d]*/(/.*)$")
+	while path and path ~= "" do
+		if format_of(path) then
+			local cha = fs.cha(Url(path))
+			if cha and not cha.is_dir then
+				return path
+			end
+		end
+		path = path:match("^(.*)/[^/]*$")
+	end
+end
+
+-- `7zz t`: decompress everything and compare the stored checksums.
+local function test()
+	local archive = test_target()
+	if not archive then
+		return ya.notify { title = "zipfs", content = "Hover an archive or enter one first", level = "warn", timeout = 4 }
+	end
+	local name = archive:match("[^/]+$")
+	ya.notify { title = "zipfs", content = "Testing " .. name .. "...", timeout = 2 }
+	local out, e = Command("7zz")
+		:arg({ "t", "-bd", "-sccUTF-8", archive })
+		:stdin(Command.NULL)
+		:stdout(Command.PIPED)
+		:stderr(Command.PIPED)
+		:output()
+	if not out then
+		return ya.notify { title = "zipfs", content = "zipfs needs `7zz` in PATH: " .. tostring(e), level = "error", timeout = 5 }
+	elseif out.status.success then
+		return ya.notify { title = "zipfs", content = name .. ": no errors", timeout = 4 }
+	end
+	local lines = {}
+	for line in (out.stderr .. "\n" .. out.stdout):gmatch("[^\n]+") do
+		if #lines < 5 and (line:find("ERROR") or line:find("[Ee]rror")) then
+			lines[#lines + 1] = line
+		end
+	end
+	if #lines == 0 then
+		lines[1] = "7zz exited with code " .. tostring(out.status.code)
+	end
+	ya.notify { title = "zipfs: " .. name .. " is damaged", content = table.concat(lines, "\n"), level = "error", timeout = 10 }
+end
+
+-- `plugin zipfs clean` empties the cache. `plugin zipfs test` checks an archive. Otherwise, like smart-enter: zip -> browse
 -- inside, directory -> enter, other file -> open.
 function M:entry(job)
 	if job.args[1] == "clean" then
 		return clean()
+	elseif job.args[1] == "test" then
+		return test()
 	end
 
 	local h = hovered()
@@ -1210,6 +1337,7 @@ M._test = {
 	format_of = format_of,
 	writable = writable,
 	parse_listing = parse_listing,
+	companions = companions,
 	parse_mode = parse_mode,
 	parse_time = parse_time,
 }

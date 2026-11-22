@@ -87,6 +87,28 @@ echo "deep" >"$WORK/in/folder/sub/n.txt"
 	tar cf "$WORK/work.tar" .
 	tar czf "$WORK/work.tar.gz" .
 	tar cf - . | zstd -q -o "$WORK/work.tar.zst"
+	cp "$WORK/work.zip" "$WORK/book.epub"
+) || {
+	echo "Could not build test archives"
+	exit 1
+}
+
+# A zip as Finder's "Compress" makes it: AppleDouble files beside the items and under
+# __MACOSX/, built by hand so the test doesn't need macOS.
+(
+	mkdir -p "$WORK/mac/d2" "$WORK/mac/__MACOSX/d2" || exit 1
+	cd "$WORK/mac" || exit 1
+	echo "photo" >photo.txt
+	echo "x" >d2/x.txt
+	echo "meta" >._photo.txt
+	echo "meta" >__MACOSX/._photo.txt
+	echo "meta" >__MACOSX/d2/._x.txt
+	echo "meta" >__MACOSX/._d2
+	7zz a -tzip "$WORK/mac.zip" . >/dev/null
+	# Stored (no compression), then one byte flipped inside the data: a CRC error.
+	head -c 4000 /dev/zero | tr '\0' 'a' >"$WORK/mac/big.txt"
+	7zz a -tzip -mx0 "$WORK/bad.zip" big.txt >/dev/null
+	printf 'b' | dd of="$WORK/bad.zip" bs=1 seek=2000 conv=notrunc 2>/dev/null
 ) || {
 	echo "Could not build test archives"
 	exit 1
@@ -350,12 +372,75 @@ targz_read_only() {
 	expect "tar.gz unchanged" test "$(sum "$WORK/work.tar.gz")" = "$before"
 }
 
+# --- tests: other names, macOS metadata, integrity ----------------------------------------
+
+epub_browse() {
+	emit cd "$WORK"
+	enter "$WORK/book.epub"
+	emit reveal "$(mount "$WORK/book.epub" keep.txt)"
+	expect "preview inside .epub" wait_until on_screen "keep me"
+}
+
+macos_hidden() {
+	emit cd "$WORK"
+	enter "$WORK/mac.zip"
+	expect "photo.txt listed" wait_until on_screen "photo.txt"
+	expect "__MACOSX hidden" not on_screen "__MACOSX"
+	expect "._photo.txt hidden" not on_screen "._photo"
+}
+
+macos_rename() {
+	emit reveal "$(mount "$WORK/mac.zip" photo.txt)"
+	wait_until on_screen "photo.txt"
+	emit rename --empty=all
+	sleep 0.5
+	keys "pic.txt" Enter
+	expect "pic.txt exists" wait_until has "$WORK/mac.zip" pic.txt
+	expect "._pic.txt moved along" has "$WORK/mac.zip" ._pic.txt
+	expect "__MACOSX/._pic.txt moved along" has "$WORK/mac.zip" __MACOSX/._pic.txt
+	expect "old metadata gone" not has "$WORK/mac.zip" __MACOSX/._photo.txt
+}
+
+macos_delete() {
+	emit reveal "$(mount "$WORK/mac.zip" d2)"
+	wait_until on_screen "d2"
+	emit remove --permanently --force
+	expect "d2 deleted" wait_until not has "$WORK/mac.zip" d2/x.txt
+	expect "__MACOSX/d2 deleted too" not has "$WORK/mac.zip" __MACOSX/d2/._x.txt
+	expect "__MACOSX/._d2 deleted too" not has "$WORK/mac.zip" __MACOSX/._d2
+	expect "pic.txt metadata kept" has "$WORK/mac.zip" __MACOSX/._pic.txt
+}
+
+test_ok() {
+	emit cd "$WORK"
+	emit reveal "$WORK/work.7z"
+	wait_until on_screen "work.7z"
+	emit plugin zipfs test
+	expect "reports no errors" wait_until on_screen "work.7z: no errors"
+}
+
+test_inside() {
+	emit cd "$(mount "$WORK/work.zip" d)"
+	wait_until on_screen "a.txt"
+	emit plugin zipfs test
+	expect "tests the archive it is in" wait_until on_screen "work.zip: no errors"
+}
+
+test_damaged() {
+	emit cd "$WORK"
+	emit reveal "$WORK/bad.zip"
+	wait_until on_screen "bad.zip"
+	emit plugin zipfs test
+	expect "reports damage" wait_until on_screen "bad.zip is damaged"
+}
+
 # --- run ------------------------------------------------------------------------------
 
 start_yazi
 for t in zip_browse zip_preview zip_copy_out zip_paste_in zip_paste_folder zip_overwrite \
 	zip_move_in zip_rename zip_create zip_delete zip_trash zip_save_back zip_clean_saves_edits \
-	sevenz_browse sevenz_edit tar_browse targz_browse tarzst_browse targz_read_only; do
+	sevenz_browse sevenz_edit tar_browse targz_browse tarzst_browse targz_read_only \
+	epub_browse macos_hidden macos_rename macos_delete test_ok test_inside test_damaged; do
 	run "$t"
 done
 

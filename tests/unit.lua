@@ -67,6 +67,15 @@ for name, want in pairs {
 	["k.txz"] = "tar",
 	["l.tar.zst"] = "tar",
 	["m.tzst"] = "tar",
+	["book.epub"] = "zip",
+	["app.apk"] = "zip",
+	["pkg.whl"] = "zip",
+	["comic.cbz"] = "zip",
+	["comic.cb7"] = "7z",
+	["comic.cbr"] = "ro",
+	["disc.iso"] = "ro",
+	["setup.cab"] = "ro",
+	["image.dmg"] = nil, -- 7zz lists folders in it as files
 	["n.gz"] = nil, -- a plain gzip file is not an archive of files
 	["o.txt"] = nil,
 	["zip"] = nil,
@@ -163,6 +172,42 @@ do
 	check("drops ..", idx.entries[".."] == nil)
 	check("absolute made relative", idx.entries["abs.txt"] ~= nil)
 	check("keeps normal", idx.entries["fine.txt"] ~= nil)
+end
+
+-- parse_listing + companions: macOS metadata ------------------------------------------
+
+do
+	local idx = T.parse_listing(listing {
+		{ Path = "photo.txt", Folder = "-", Size = "6" },
+		{ Path = "._photo.txt", Folder = "-", Size = "4" },
+		{ Path = "d2", Folder = "+" },
+		{ Path = "d2/x.txt", Folder = "-", Size = "2" },
+		{ Path = "__MACOSX", Folder = "+" },
+		{ Path = "__MACOSX/._photo.txt", Folder = "-", Size = "4" },
+		{ Path = "__MACOSX/._d2", Folder = "-", Size = "4" },
+		{ Path = "__MACOSX/d2", Folder = "+" },
+		{ Path = "__MACOSX/d2/._x.txt", Folder = "-", Size = "4" },
+	})
+	eq("mac root children", sorted(idx.children[""]), sorted { "d2", "photo.txt" })
+	check("no __MACOSX entry", idx.entries.__MACOSX == nil)
+	check("no ._photo entry", idx.entries["._photo.txt"] == nil)
+	check("__MACOSX remembered", idx.hidden["__MACOSX/d2/._x.txt"] ~= nil)
+
+	local function names(list, i)
+		local out = {}
+		for _, c in ipairs(list) do
+			out[#out + 1] = c[i]
+		end
+		return table.concat(out, ",")
+	end
+	local c = T.companions(idx, "photo.txt", "pic.txt")
+	eq("file companions", names(c, 1), "._photo.txt,__MACOSX/._photo.txt")
+	eq("file companions renamed", names(c, 2), "._pic.txt,__MACOSX/._pic.txt")
+	c = T.companions(idx, "d2", "e")
+	eq("folder companions (subtree once)", names(c, 1), "__MACOSX/._d2,__MACOSX/d2")
+	eq("folder companions renamed", names(c, 2), "__MACOSX/._e,__MACOSX/e")
+	eq("nested file companions", names(T.companions(idx, "d2/x.txt"), 1), "__MACOSX/d2/._x.txt")
+	eq("none for unrelated", #T.companions(idx, "nothing"), 0)
 end
 
 print(string.format("%d passed, %d failed", passed, failed))

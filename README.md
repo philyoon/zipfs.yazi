@@ -15,11 +15,15 @@ Tested on Yazi 26.9.1, on macOS and Linux (CI runs both). The custom VFS API is 
 
 | Format | Browse, preview, open, copy out | Edit |
 | --- | --- | --- |
-| zip, jar | yes | yes |
-| 7z | yes | yes |
-| rar | yes | read-only (7zz can't write rar) |
+| zip, and zips by another name: jar, war, ear, aar, apk, ipa, xpi, whl, nupkg, vsix, epub, cbz | yes | yes |
+| 7z, cb7 | yes | yes |
+| rar, cbr | yes | read-only (7zz can't write rar) |
+| iso, cab | yes | read-only |
 | tar | yes | read-only (7zz can't delete from tar) |
 | tar.gz, tgz, tar.bz2, tbz, tbz2, tar.xz, txz, tar.zst, tzst | yes | read-only |
+
+Editing a signed package (apk, ipa, jar) breaks its signature. dmg is left out: 7zz lists
+the folders in it as files.
 
 A compressed tar can't be read one file at a time, so the first visit decompresses the
 inner tar into the cache. That takes as long as extracting the whole archive once and uses
@@ -33,6 +37,10 @@ as much disk space; later visits are fast.
 - Copy files out: yank inside the archive, paste outside.
 - Non-ASCII names (Korean, Japanese, ...) and names with `[`, `*`, `?`.
 - Zips that leave out directory entries (`zip -D`).
+- Zips made by macOS Finder: the `__MACOSX/` folder and `._name` files (Finder metadata)
+  are hidden, and follow their item when you rename, delete or trash it.
+- Check an archive for damage with `g t` (`plugin zipfs test`, which runs `7zz t`): on
+  the hovered archive, or the one you are in.
 - Edit zip and 7z: trash (`d`), delete (`D`), rename (`r`), new file (`a`), new folder (`a`
   with a trailing `/`). Trash extracts the item and moves it to the system trash before
   removing it from the archive, so it can be recovered as a normal file.
@@ -115,6 +123,11 @@ desc = "Enter directory or archive, or open file"
 on   = ["g", "z"]
 run  = "plugin zipfs clean"
 desc = "Clear the zipfs cache"
+
+[[mgr.prepend_keymap]]
+on   = ["g", "t"]
+run  = "plugin zipfs test"
+desc = "Check the archive for damage"
 ```
 
 ## How it works
@@ -150,6 +163,7 @@ desc = "Clear the zipfs cache"
 
 - Nested archives are not entered (a zip inside a zip opens with your opener instead).
 - Encrypted archives and entries are not supported.
+- A file of your own named `._something` inside an archive is hidden like Finder metadata.
 - Every VFS call re-reads the cached listing (Yazi gives each call a fresh Lua state), so
   very large archives (tens of thousands of entries) will feel slower.
 - Solid 7z and rar archives decompress everything before a file to reach it, so previews
